@@ -54,6 +54,8 @@ if __name__ == '__main__':
 
     # 모델 경로 준비
     # 모델 포멧은 TensorFlow는 h5, PyTorch는 pickle
+    value_network_name = f'{args.name}_{args.rl_method}_{args.net}_value.weights.h5'
+    policy_network_name = f'{args.name}_{args.rl_method}_{args.net}_policy.weights.h5'
     value_network_path = os.path.join(settings.BASE_DIR, 'models', value_network_name)
     policy_network_path = os.path.join(settings.BASE_DIR, 'models', policy_network_name)
 
