@@ -8,7 +8,6 @@ from quantylab.rltrader import settings
 from quantylab.rltrader import utils
 from quantylab.rltrader import data_manager
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['train', 'test', 'update', 'predict'], default='train')
@@ -29,8 +28,18 @@ if __name__ == '__main__':
     output_name = f'{args.mode}_{args.name}_{args.rl_method}_{args.net}'
     learning = args.mode in ['train', 'update']
     reuse_models = args.mode in ['test', 'update', 'predict']
-    value_network_name = f'{args.name}_{args.rl_method}_{args.net}_value.mdl'
-    policy_network_name = f'{args.name}_{args.rl_method}_{args.net}_policy.mdl'
+    
+    # TensorFlow backend인 경우 .weights.h5 확장자 사용
+    if args.backend == 'tensorflow':
+        value_network_name = f'{args.name}_{args.rl_method}_{args.net}_value.weights.h5'
+        policy_network_name = f'{args.name}_{args.rl_method}_{args.net}_policy.weights.h5'
+    else:
+        value_network_name = f'{args.name}_{args.rl_method}_{args.net}_value.mdl'
+        policy_network_name = f'{args.name}_{args.rl_method}_{args.net}_policy.mdl'
+
+    value_network_path = os.path.join(settings.BASE_DIR, 'models', value_network_name)
+    policy_network_path = os.path.join(settings.BASE_DIR, 'models', policy_network_name)
+
     start_epsilon = 1 if args.mode in ['train', 'update'] else 0
     num_epoches = 1000 if args.mode in ['train', 'update'] else 1
     num_steps = 5 if args.net in ['lstm', 'cnn'] else 1
@@ -51,11 +60,6 @@ if __name__ == '__main__':
     params = json.dumps(vars(args))
     with open(os.path.join(output_path, 'params.json'), 'w') as f:
         f.write(params)
-
-    # 모델 경로 준비
-    # 모델 포멧은 TensorFlow는 h5, PyTorch는 pickle
-    value_network_path = os.path.join(settings.BASE_DIR, 'models', value_network_name)
-    policy_network_path = os.path.join(settings.BASE_DIR, 'models', policy_network_name)
 
     # 로그 기록 설정
     log_path = os.path.join(output_path, f'{output_name}.log')
