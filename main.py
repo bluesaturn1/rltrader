@@ -3,6 +3,8 @@ import sys
 import logging
 import argparse
 import json
+from test_mysql_loader import load_data_from_mysql, get_stock_items, load_data_from_table
+import pandas as pd
 
 from quantylab.rltrader import settings
 from quantylab.rltrader import utils
@@ -24,6 +26,80 @@ if __name__ == '__main__':
     parser.add_argument('--discount_factor', type=float, default=0.7)
     parser.add_argument('--balance', type=int, default=100000000)
     args = parser.parse_args()
+
+    host = 'localhost'
+    user = 'bluesaturn'
+    password = 'bluesaturn1+'
+    database_buy_list = 'daily_buy_list'
+    database_craw = 'daily_craw'
+    port = 3306
+    
+    print("Testing MySQL connection...")
+    if test_mysql_connection(host, user, password, database_buy_list, port):
+        print("\nFetching stock items from stock_item_all table...")
+        stock_items_df = get_stock_items(host, user, password, database_buy_list)
+        
+        if not stock_items_df.empty:
+            print("\nStock items found:")
+            print(stock_items_df.head())
+            
+            results = []
+            count = 0
+            
+            for index, row in stock_items_df.iterrows():
+                print(f"\nProcessing {index + 1} of {len(stock_items_df)}: {row['code_name']}")
+                if count >= 10:
+                    break
+                
+                table_name = row['code_name']
+                print(f"\nLoading data from table: {table_name}")
+                df = load_data_from_table(host, user, password, database_craw, table_name)
+                
+                if not df.empty:
+                    # 특정 기간(2020년) 동안 60일에 100% 오른 종목 찾기
+                    df['date'] = pd.to_datetime(df['date']).dt.date
+                    df_2020 = df[(df['date'] >= pd.to_datetime('2020-01-01').date()) & (df['date'] <= pd.to_datetime('2020-12-31').date())]
+                    df_2020 = df_2020.sort_values(by='date')
+                    
+                    if len(df_2020) >= 60:
+                        df_2020['price_change'] = df_2020['close'].pct_change(periods=60)
+                        df_2020['price_change'] = df_2020['price_change'].fillna(0)
+                        if (df_2020['price_change'] >= 1.0).any():
+                            print(f"\n{table_name} 종목이 2020년에 60일 동안 100% 이상 상승한 기록이 있습니다.")
+                            max_date = df_2020[df_2020['price_change'] >= 1.0]['date'].iloc[0]
+                            start_date = max_date - pd.Timedelta(days=60)
+                            end_date = max_date + pd.Timedelta(days=30)
+                            highest_date = df_2020.loc[df_2020['close'].idxmax()]['date']
+                            highest_date_30 = highest_date + pd.Timedelta(days=30)
+                            two_years_ago = start_date - pd.Timedelta(days=730)
+                            end_date_60 = end_date + pd.Timedelta(days=60)
+                            results.append({
+                                'code_name': table_name,
+                                'code': row['code'],
+                                'two_years_ago': two_years_ago,
+                                'start_date': start_date,
+                                'end_date': end_date,
+                                'end_date_60': end_date_60,
+                                'highest_date': highest_date,
+                                'highest_date_30': highest_date_30
+                            })
+                            count += 1
+                    else:
+                        print(f"\n{table_name} 종목의 2020년 데이터가 60일 미만입니다.")
+                else:
+                    print(f"\n{table_name} 테이블에 데이터가 없습니다.")
+            
+            # 조건을 충족한 종목 출력
+            if results:
+                print("\n조건을 충족한 종목 목록:")
+                for result in results:
+                    print(f"종목명: {result['code_name']}, 코드: {result['code']}, 2년 전: {result['two_years_ago']}, 시작일: {result['start_date']}, 마지막일: {result['end_date']}, 마지막일 60일 후: {result['end_date_60']}, 최고값 나온 날짜: {result['highest_date']}, 최고값 나온 날짜 30일째: {result['highest_date_30']}")
+            else:
+                print("\n조건을 충족한 종목이 없습니다.")
+        else:
+            print("No stock items found in the stock_item_all table.")
+    else:
+        print("MySQL connection test failed.")
 
     # 학습기 파라미터 설정
     output_name = f'{args.mode}_{args.name}_{args.rl_method}_{args.net}'
