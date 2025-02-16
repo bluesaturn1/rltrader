@@ -6,7 +6,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from tqdm import tqdm
-from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 
 def load_data_from_mysql(host, user, password, database, table, start_date=None, end_date=None):
     try:
@@ -77,12 +76,6 @@ def find_starting_point_ma(df, short_ma=5, long_ma=20):
     crossover = df[(df['MA_5'] > df['MA_20']) & (df['MA_5'].shift(1) <= df['MA_20'].shift(1))]
     return crossover.iloc[0]['date'] if not crossover.empty else None
 
-def detect_pullback(df, start_date, end_date, pullback_threshold=0.05):
-    df_period = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
-    max_price = df_period['close'].max()
-    pullback = df_period[df_period['close'] <= max_price * (1 - pullback_threshold)]
-    return not pullback.empty
-
 if __name__ == '__main__':
     host = cf.MYSQL_HOST
     user = cf.MYSQL_USER
@@ -96,10 +89,6 @@ if __name__ == '__main__':
     search_end_date = cf.SEARCH_END_DATE
     period = cf.PERIOD
     price_change_threshold = cf.PRICE_CHANGE_THRESHOLD
-    
-    # 텔레그램 설정
-    telegram_token = cf.TELEGRAM_BOT_TOKEN
-    telegram_chat_id = cf.TELEGRAM_CHAT_ID
     
     print("Testing MySQL connection...")
     if test_mysql_connection(host, user, password, database_buy_list, port):
@@ -198,10 +187,6 @@ if __name__ == '__main__':
                                                 start_date = find_starting_point_ma(df)
                                             if last_date is None or (start_date - last_date).days >= 180:
                                                 print("급등 시작일:", start_date)
-                                                
-                                                # 1차 상승 후 눌림목 감지
-                                                pullback_signal = detect_pullback(df, start_date, new_last_date)
-                                                
                                                 results.append({
                                                     'code_name': table_name,
                                                     'code': row['code'],
@@ -212,8 +197,7 @@ if __name__ == '__main__':
                                                     'min_price_date': min_price_date,
                                                     'max_price': max_price,
                                                     'max_price_date': max_price_date,
-                                                    'price_change': price_change,
-                                                    'pullback_signal': pullback_signal
+                                                    'price_change': price_change
                                                 })
                                                 last_date = new_last_date
                                                 count += 1
@@ -234,19 +218,13 @@ if __name__ == '__main__':
             if results:
                 print("\n조건을 충족한 종목 목록:")
                 for result in results:
-                    print(f"종목명: {result['code_name']}, 코드: {result['code']}, 시작일: {result['first_date']}, 종료일: {result['last_date']}, 급등 시작일: {result['start_date']}, 최저가: {result['min_price']} (날짜: {result['min_price_date']}), 최고가: {result['max_price']} (날짜: {result['max_price_date']}), 상승율: {result['price_change']:.2f}%, 눌림목 신호: {result['pullback_signal']}")
-
+                    print(f"종목명: {result['code_name']}, 코드: {result['code']}, 시작일: {result['first_date']}, 종료일: {result['last_date']}, 급등 시작일: {result['start_date']}, 최저가: {result['min_price']} (날짜: {result['min_price_date']}), 최고가: {result['max_price']} (날짜: {result['max_price_date']}), 상승율: {result['price_change']:.2f}%")
+                
                 # 결과를 MySQL에 저장
                 save_results_to_mysql(results, host, user, password, database_buy_list, results_table)
-
-                # 검색결과를 텔레그램 메시지 보내기
-                message = f"Finding completed.\nTotal : {len(results)}"
-                send_telegram_message(telegram_token, telegram_chat_id, message)
-
             else:
                 print("\n조건을 충족한 종목이 없습니다.")
         else:
             print("No stock items found in the stock_item_all table.")
     else:
         print("MySQL connection test failed.")
-

@@ -1,16 +1,18 @@
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score
-import os
-import joblib
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
-from mysql_loader import list_tables_in_database, load_data_from_mysql
-from test_mysql_loader import get_stock_items  # get_stock_items 함수를 가져옵니다.
-from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
+from tqdm import tqdm
+import os
+from datetime import datetime
+from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 
 def load_filtered_stock_results(host, user, password, database, table):
     try:
@@ -22,28 +24,26 @@ def load_filtered_stock_results(host, user, password, database, table):
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
-def load_daily_craw_data(host, user, password, database, table, start_date, end_date=None, limit=750):
+def load_data_from_mysql(host, user, password, database, table, start_date, end_date=None, limit=750):
     try:
         engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
         start_date_str = start_date.strftime('%Y%m%d')
         end_date_str = end_date.strftime('%Y%m%d') if end_date else None
         if end_date_str:
             query = f"""
-                SELECT * FROM `{table}`
-                WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
-                ORDER BY date ASC
-                LIMIT {limit}
+            SELECT * FROM `{table}`
+            WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
+            ORDER BY date ASC
+            LIMIT {limit}
             """
         else:
             query = f"""
-                SELECT * FROM `{table}`
-                WHERE date >= '{start_date_str}'
-                ORDER BY date ASC
-                LIMIT {limit}
+            SELECT * FROM `{table}`
+            WHERE date >= '{start_date_str}'
+            ORDER BY date ASC
+            LIMIT {limit}
             """
-        #print(f"Executing query: {query}")
         df = pd.read_sql(query, engine)
-        print(f"Data loaded from {start_date_str} to {end_date_str} for table {table}: {len(df)} rows")
         return df
     except SQLAlchemyError as e:
         print(f"Error loading data from MySQL: {e}")
@@ -91,6 +91,10 @@ def extract_features(df):
         df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
         df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
         
+        # 마지막 5봉을 레이블링
+        df['Label'] = 0
+        df.loc[df.index[-5:], 'Label'] = 1
+        
         df = df.dropna()
         print(f'Features extracted: {len(df)} rows')
         return df
@@ -98,117 +102,63 @@ def extract_features(df):
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
-def label_data(df):
-    try:
-        print('Labeling data')
-        df['Label'] = 0  # 기본값을 0으로 설정
-        df.iloc[-5:, df.columns.get_loc('Label')] = 1  # 마지막 5개를 1로 설정 (5일 이내에 급등할 것으로 예상)
-        print(f'Data labeled: {len(df)} rows')
-        return df
-    except Exception as e:
-        print(f'Error labeling data: {e}')
-        return pd.DataFrame()
+def prepare_data(df):
+    # 숫자형 데이터만 선택
+    numeric_df = df.select_dtypes(include=[np.number])
+    
+    # 무한대 값이나 너무 큰 값 제거
+    numeric_df = numeric_df.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    # Feature scaling
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(numeric_df)
+    
+    # Prepare sequences
+    X, y = [], []
+    sequence_length = 60
+    for i in range(sequence_length, len(scaled_data)):
+        X.append(scaled_data[i-sequence_length:i])
+        y.append(scaled_data[i, -1])  # Assuming the label is the last column
+    X, y = np.array(X), np.array(y)
+    
+    return X, y, scaler
 
-def train_model(X, y, use_saved_params=True):
-    try:
-        print('Training model')
-        # 무한대 값이나 너무 큰 값 제거
-        X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        y = y[X.index]  # X와 동일한 인덱스를 유지
-        
-        param_file = 'best_params.pkl'
-        
-        if use_saved_params and os.path.exists(param_file):
-            print("Loading saved parameters...")
-            best_params = joblib.load(param_file)
-            model = xgb.XGBClassifier(**best_params, random_state=42)
-        else:
-            # 하이퍼파라미터 그리드 설정
-            param_grid = {
-                'n_estimators': [100],
-                'max_depth': [3],
-                'learning_rate': [0.01],
-                'subsample': [0.8],
-                'colsample_bytree': [0.8]
-                #'n_estimators': [100, 200, 300],
-                #'max_depth': [3, 6, 9],
-                #'learning_rate': [0.01, 0.1, 0.2],
-                #'subsample': [0.8, 1.0],
-                #'colsample_bytree': [0.8, 1.0]
-            }
-            
-            # GridSearchCV를 사용하여 하이퍼파라미터 튜닝
-            model = xgb.XGBClassifier(random_state=42)
-            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=2)
-            grid_search.fit(X, y)
-            
-            # 최적의 하이퍼파라미터 출력
-            best_params = grid_search.best_params_
-            print(f'Best parameters found: {best_params}')
-            
-            # 최적의 하이퍼파라미터 저장
-            joblib.dump(best_params, param_file)
-            
-            # 최적의 모델로 훈련
-            model = grid_search.best_estimator_
-        
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        print(f'Accuracy: {accuracy_score(y_test, y_pred)}')
-        return model
-    except Exception as e:
-        print(f'Error training model: {e}')
+def create_lstm_cnn_model(input_shape):
+    model = Sequential()
+    model.add(Conv1D(filters=64, kernel_size=2, activation='relu', input_shape=input_shape))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(LSTM(50, return_sequences=True))
+    model.add(LSTM(50))
+    model.add(Dense(1, activation='sigmoid'))
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+def train_lstm_cnn_model(X, y):
+    if len(X) == 0 or len(y) == 0:
+        print("Not enough data to train the model.")
         return None
-
-def predict_pattern(model, df, stock_code):
-    try:
-        print('Predicting patterns')
-        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Lag_1', 'Lag_2', 'Lag_3', 'Rolling_Std_5', 'Rolling_Std_20']]
-        # 무한대 값이나 너무 큰 값 제거
-        X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        predictions = model.predict(X)
-        df = df.loc[X.index]  # 동일한 인덱스를 유지
-        df['Prediction'] = predictions
-        print(f'Patterns predicted: {df["Prediction"].sum()} matches found')
-        
-        # 날짜 형식을 datetime으로 변환
-        df['date'] = pd.to_datetime(df['date'])
-        
-        # 검증 기간 동안의 패턴 필터링
-        recent_patterns = df[(df['Prediction'] == 1) & (df['date'] >= cf.VALIDATION_START_DATE) & (df['date'] <= cf.VALIDATION_END_DATE)]
-        
-        # 날짜와 종목 코드만 출력
-        recent_patterns = recent_patterns.copy()
-        recent_patterns['stock_code'] = stock_code
-        result = recent_patterns[['date', 'stock_code']]
-        return result
-    except Exception as e:
-        print(f'Error predicting patterns: {e}')
-        return pd.DataFrame()
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = create_lstm_cnn_model((X_train.shape[1], X_train.shape[2]))
+    
+    # 조기 종료 콜백 추가
+    early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+    
+    model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_test, y_test), callbacks=[early_stopping])
+    return model
 
 def evaluate_performance(df, start_date, end_date):
-    #print(df)
     try:
-        print('Evaluating performance')
-        df['date'] = pd.to_datetime(df['date'])
-        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-        if df.empty:
-            print(f"No data found between {start_date} and {end_date}")
-            return None
-        max_close = df['close'].max()
-        initial_close = df['close'].iloc[0]
-        max_return = (max_close / initial_close - 1) * 100
+        max_return = (df['close'].max() - df['close'].iloc[0]) / df['close'].iloc[0]
         return max_return
     except Exception as e:
         print(f'Error evaluating performance: {e}')
         return None
 
-def save_performance_to_db(df, host, user, password, database, table):
+def save_performance_to_db(performance_df, host, user, password, database, table):
     try:
         engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
-        df.to_sql(table, engine, if_exists='replace', index=False)
-        print(f"Performance results saved to {table} table in {database} database")
+        performance_df.to_sql(table, engine, if_exists='replace', index=False)
+        print(f"Performance results saved to {table} table in {database} database.")
     except SQLAlchemyError as e:
         print(f"Error saving performance results to MySQL: {e}")
 
@@ -221,8 +171,11 @@ if __name__ == '__main__':
     results_table = cf.MYSQL_RESULTS_TABLE
     stock_items_table = 'stock_item_all'
     performance_table = 'performance_results'  # 성능 결과를 저장할 테이블 이름
+    # 텔레그램 설정
+    telegram_token = cf.TELEGRAM_BOT_TOKEN
+    telegram_chat_id = cf.TELEGRAM_CHAT_ID
     
-    print("Starting pattern recognition")
+    print("Starting LSTM-CNN model training")
     
     # Load filtered stock results
     filtered_results = load_filtered_stock_results(host, user, password, database_buy_list, results_table)
@@ -232,28 +185,38 @@ if __name__ == '__main__':
         
         total_models = 0
         successful_models = 0
-        model_filename = 'trained_model.json'
+        
+        # 오늘 날짜를 포함한 모델 파일 경로 생성
+        today = datetime.today().strftime('%Y-%m-%d')
         
         # 사용자에게 트레이닝 자료를 다시 트레이닝할 것인지, 저장된 것을 불러올 것인지 물어봄
         choice = input("Do you want to retrain the model? (yes/no): ").strip().lower()
         
-        if choice == 'no' and os.path.exists(model_filename):
-            print("Loading saved model...")
-            model = xgb.XGBClassifier()
-            model.load_model(model_filename)
-        else:
-            # 하이퍼파라미터 튜닝 결과를 재사용할 것인지 물어봄
-            use_saved_params = input("Do you want to use saved hyperparameters? (yes/no): ").strip().lower() == 'yes'
-            
+        if choice == 'no':
+            # 모델 파일 목록을 가져와서 사용자에게 선택하게 함
+            model_files = [f for f in os.listdir('./models') if f.startswith('lstm_cnn_model_')]
+            if model_files:
+                print("Available models:")
+                for i, file in enumerate(model_files):
+                    print(f"{i + 1}. {file}")
+                model_choice = int(input("Select a model to load (number): ")) - 1
+                model_filename = f'./models/{model_files[model_choice]}'
+                print(f"Loading saved model: {model_filename}")
+                model = tf.keras.models.load_model(model_filename)
+            else:
+                print("No saved models found. Training a new model.")
+                choice = 'yes'
+        
+        if choice == 'yes':
             # filtered_results 데이터프레임의 각 행을 반복하며 종목별로 데이터를 로드하고 모델을 훈련 
-            # (900d일 전부터 급등 시작까지, feature extracted는 500봉 정도 나와야함)
+            # (920일 전부터 급등 시작까지, feature extracted는 실제로는 500봉 정도 나옴)
             for index, row in tqdm(filtered_results.iterrows(), total=filtered_results.shape[0], desc="Training models"):
                 code_name = row['code_name']
-                end_date = row['start_date']
-                start_date = end_date - pd.Timedelta(days=900)
+                start_date = row['start_date']
+                end_date = start_date - pd.Timedelta(days=920)
                 
-                print(f"\nLoading data for {code_name} from {start_date} to {end_date}")
-                df = load_daily_craw_data(host, user, password, database_craw, code_name, start_date, end_date)
+                print(f"\nLoading data for {code_name} from {end_date} to {start_date}")
+                df = load_data_from_mysql(host, user, password, database_craw, code_name, end_date, start_date)
                 
                 if not df.empty:
                     print(f"Data for {code_name} loaded successfully")
@@ -261,24 +224,19 @@ if __name__ == '__main__':
                     # Extract features
                     df = extract_features(df)
                     
-                    # Label data
-                    df = label_data(df)
-                    
-                    if not df.empty:
-                        # Train model
-                        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Lag_1', 'Lag_2', 'Lag_3', 'Rolling_Std_5', 'Rolling_Std_20']]
-                        y = df['Label']
-                        model = train_model(X, y, use_saved_params)
+                    if not df.empty and len(df) > 400:
+                        print(f"Features extracted for {code_name}: {len(df)} rows")
                         
-                        total_models += 1
+                        # Prepare data
+                        X, y, scaler = prepare_data(df)
+                        
+                        # Train model
+                        model = train_lstm_cnn_model(X, y)
                         
                         if model:
+                            total_models += 1
                             successful_models += 1
-                            # Predict patterns
-                            result = predict_pattern(model, df, code_name)
-                            print(result)
-                            # 훈련 정보 출력
-                            print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                            print(f"Model trained for {code_name} from {end_date} to {start_date}")
                 else:
                     print(f"No data found for {code_name} in the specified date range")
             
@@ -286,25 +244,34 @@ if __name__ == '__main__':
             print(f"Successful models: {successful_models}")
             
             # 모델 저장
-            model.save_model(model_filename)
+            os.makedirs('./models', exist_ok=True)
+            model_filename = f'./models/lstm_cnn_model_{today}_{successful_models}.h5'
+            model.save(model_filename)
             print(f"Model saved as {model_filename}")
         
+        # 훈련된 모델의 수를 출력
+        print(f"Total models trained: {total_models}")
+        print(f"Successful models: {successful_models}")
+
+        # 훈련이 끝난 후 텔레그램 메시지 보내기
+        message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
+        send_telegram_message(telegram_token, telegram_chat_id, message)
+
         # 훈련이 끝난 후 사용자 입력 대기
         input("훈련이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
-
+    
         # 검증을 위해 cf.py 파일의 설정에 따라 데이터를 불러옴
         print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
-        validation_start_date = cf.VALIDATION_START_DATE
-        validation_end_date = cf.VALIDATION_END_DATE
+        validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+        validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
         validation_results = pd.DataFrame()
         
         # 모든 종목에 대해 검증 데이터 로드
-        stock_items = get_stock_items(host, user, password, database_buy_list)
+        stock_items = load_filtered_stock_results(host, user, password, database_buy_list, stock_items_table)
         print(stock_items)  # get_stock_items 함수가 반환하는 데이터 확인
         
         total_stock_items = len(stock_items)
         print(stock_items.head())  # 반환된 데이터프레임의 첫 몇 줄을 출력하여 확인
-        pattern_found = 0  # 패턴 발견 여부를 추적하는 변수
         processed_dates = set()  # 이미 처리된 날짜를 추적하는 집합
         for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
             table_name = row.code_name
@@ -313,8 +280,9 @@ if __name__ == '__main__':
             for validation_date in pd.date_range(start=validation_start_date, end=validation_end_date):
                 if validation_date in processed_dates:
                     continue  # 이미 처리된 날짜는 건너뜀
-                start_date_750 = validation_date - pd.Timedelta(days=750)
-                df = load_daily_craw_data(host, user, password, database_craw, table_name, start_date_750)
+                start_date_920 = validation_date - pd.Timedelta(days=920)
+                # 920일 전부터 검증 날짜까지의 데이터를 로드(약 500봉)
+                df = load_data_from_mysql(host, user, password, database_craw, table_name, start_date_920, validation_date)
                 
                 if not df.empty:
                     print(f"Data for {table_name} loaded successfully for validation on {validation_date}")
@@ -324,21 +292,36 @@ if __name__ == '__main__':
                     df = extract_features(df)
                     
                     if not df.empty:
+                        # Prepare data
+                        X, y, scaler = prepare_data(df)
+                        
                         # Predict patterns
-                        result = predict_pattern(model, df, table_name)
-                        if not result.empty:
-                            # 중복된 날짜가 추가되지 않도록 수정
-                            result = result[~result['date'].isin(processed_dates)]
-                            validation_results = pd.concat([validation_results, result])
-                            processed_dates.update(result['date'])  # 처리된 날짜를 추가
-                            print("\nPattern found, stopping further validation.")
-                            pattern_found += 1
-                            # 패턴 발견 제한을 제거하거나 증가시킵니다.
-                            # if pattern_found >= 50:
-                            #     break
-            # 패턴 발견 제한을 제거하거나 증가시킵니다.
-            # if pattern_found >= 50:
-            #     break
+                        if len(X) > 0:
+                            predictions = model.predict(X)
+                            
+                            # df의 인덱스를 predictions의 길이에 맞게 슬라이싱
+                            df = df.iloc[-len(predictions):]
+                            
+                            df['Prediction'] = predictions
+                            print(f'Patterns predicted: {df["Prediction"].sum()} matches found')
+                            
+                            # 날짜 형식을 datetime으로 변환
+                            df['date'] = pd.to_datetime(df['date'])
+                            
+                            # 검증 기간 동안의 패턴 필터링
+                            recent_patterns = df[(df['Prediction'] == 1) & (df['date'] >= cf.VALIDATION_START_DATE) & (df['date'] <= cf.VALIDATION_END_DATE)]
+                            
+                            # 날짜와 종목 코드만 출력
+                            recent_patterns = recent_patterns.copy()
+                            recent_patterns['stock_code'] = table_name
+                            result = recent_patterns[['date', 'stock_code']]
+                            
+                            if not result.empty:
+                                # 중복된 날짜가 추가되지 않도록 수정
+                                result = result[~result['date'].isin(processed_dates)]
+                                validation_results = pd.concat([validation_results, result])
+                                processed_dates.update(result['date'])  # 처리된 날짜를 추가
+                                print("\nPattern found, stopping further validation.")
         
         if not validation_results.empty:
             validation_results['date'] = pd.to_datetime(validation_results['date'])
@@ -359,7 +342,7 @@ if __name__ == '__main__':
                 performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
                 performance_end_date = performance_start_date + pd.Timedelta(days=60)
                 
-                df = load_daily_craw_data(host, user, password, database_craw, code_name, performance_start_date, performance_end_date)
+                df = load_data_from_mysql(host, user, password, database_craw, code_name, performance_start_date, performance_end_date)
                 print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
                 
                 if not df.empty:
@@ -382,6 +365,10 @@ if __name__ == '__main__':
             performance_df = pd.DataFrame(performance_results)
             print("\nPerformance results:")
             print(performance_df)
+
+             # Performance 끝난 후 텔레그램 메시지 보내기
+            message = f"Performance completed.\nTotal perfornance: {len(performance_df)}\n Performance results: {performance_df}"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
             
             # 성능 결과를 데이터베이스에 저장
             save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)

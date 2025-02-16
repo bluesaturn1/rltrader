@@ -3,13 +3,12 @@ import sys
 import logging
 import argparse
 import json
-from test_mysql_loader import load_data_from_mysql, get_stock_items, load_data_from_table
+from test_mysql_loader import load_data_from_mysql, get_stock_items, load_data_from_table, test_mysql_connection  # test_mysql_connection 함수를 임포트합니다.
 import pandas as pd
 
 from quantylab.rltrader import settings
 from quantylab.rltrader import utils
 from quantylab.rltrader import data_manager
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
