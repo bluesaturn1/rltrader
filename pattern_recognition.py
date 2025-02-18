@@ -221,6 +221,10 @@ if __name__ == '__main__':
     results_table = cf.MYSQL_RESULTS_TABLE
     stock_items_table = 'stock_item_all'
     performance_table = 'performance_results'  # 성능 결과를 저장할 테이블 이름
+
+     # 텔레그램 설정
+    telegram_token = cf.TELEGRAM_BOT_TOKEN
+    telegram_chat_id = cf.TELEGRAM_CHAT_ID
     
     print("Starting pattern recognition")
     
@@ -288,6 +292,10 @@ if __name__ == '__main__':
             # 모델 저장
             model.save_model(model_filename)
             print(f"Model saved as {model_filename}")
+
+            # 훈련이 끝난 후 텔레그램 메시지 보내기
+        message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
+        send_telegram_message(telegram_token, telegram_chat_id, message)
         
         # 훈련이 끝난 후 사용자 입력 대기
         input("훈련이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
@@ -385,6 +393,10 @@ if __name__ == '__main__':
             
             # 성능 결과를 데이터베이스에 저장
             save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)
+
+             # Performance 끝난 후 텔레그램 메시지 보내기
+            message = f"Performance completed.\nTotal perfornance: {len(performance_df)}\n Performance results: {performance_df}"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
         else:
             print("No patterns found in the validation period")
         
