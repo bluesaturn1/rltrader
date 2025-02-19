@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import cf
 from tqdm import tqdm
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
+from datetime import timedelta
 
 def load_data_from_mysql(host, user, password, database, table, start_date=None, end_date=None):
     try:
@@ -65,29 +66,56 @@ def save_results_to_mysql(results, host, user, password, database, table):
     except SQLAlchemyError as e:
         print(f"Error saving results to MySQL: {e}")
 
-def find_starting_point(df, first_date, last_date, period=10, threshold=20):
+def find_rising_date(df, first_date, last_date, period=10, threshold=20, adjustment_threshold=30):
     df_period = df[(df['date'] >= first_date) & (df['date'] <= last_date)].copy()
     df_period.loc[:, '변동률'] = df_period['close'].pct_change(periods=period) * 100
     candidates = df_period[df_period['변동률'] >= threshold]
-    return candidates.iloc[0]['date'] if not candidates.empty else None
+    
+    if not candidates.empty:
+        rising_date = candidates.iloc[0]['date']
+        
+        # rising_date 바로 직전에(5일 이내) 이미 30% 오른 종목은 rising_date를 5일 전으로 당김
+        df_before_rising = df[df['date'] < rising_date].copy()
+        df_before_rising.loc[:, '변동률'] = df_before_rising['close'].pct_change(periods=period) * 100
+        adjustment_candidates = df_before_rising[df_before_rising['변동률'] >= adjustment_threshold]
+        
+        if not adjustment_candidates.empty:
+            adjustment_date = adjustment_candidates.iloc[-1]['date']
+            if (rising_date - adjustment_date).days <= 5:
+                rising_date = adjustment_date - timedelta(days=5)
+        
+        return rising_date
+    return None
 
-def find_starting_point_ma(df, short_ma=5, long_ma=20):
+def find_rising_date_ma(df, short_ma=5, long_ma=20):
     df['MA_5'] = df['close'].rolling(window=short_ma).mean()
     df['MA_20'] = df['close'].rolling(window=long_ma).mean()
     crossover = df[(df['MA_5'] > df['MA_20']) & (df['MA_5'].shift(1) <= df['MA_20'].shift(1))]
     return crossover.iloc[0]['date'] if not crossover.empty else None
 
-def detect_pullback(df, start_date, end_date, pullback_threshold=0.05):
-    df_period = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
-    max_price = df_period['close'].max()
-    pullback = df_period[df_period['close'] <= max_price * (1 - pullback_threshold)]
+def detect_pullback(df, rising_date, end_date, pullback_threshold=0.05, min_rise_period=5):
+    df_period = df[(df['date'] > rising_date) & (df['date'] <= end_date)].copy()  # rising_date 이후의 데이터만 고려
+    
+    # rising_date 이후 min_rise_period 동안 상승한 후에 눌림목을 찾음
+    df_rise_period = df_period.head(min_rise_period)
+    if df_rise_period['close'].max() <= df_rise_period['close'].min():
+        return False, None  # min_rise_period 동안 상승하지 않으면 눌림목을 찾지 않음
+    
+    # min_rise_period 이후의 데이터만 고려하여 최고가를 찾음
+    df_after_rise_period = df_period.iloc[min_rise_period:]
+    max_price = df_after_rise_period['close'].max()
+    
+    pullback = df_after_rise_period[df_after_rise_period['close'] <= max_price * (1 - pullback_threshold)]
+    
     if not pullback.empty:
-        return True, pullback.iloc[0]['date']
+        pullback_date = pullback.iloc[0]['date']
+        if pullback_date > rising_date:  # pullback_date가 rising_date 이후인지 확인
+            return True, pullback_date
     return False, None
 
-def detect_breakout(df, start_date, pullback_date, end_date, breakout_threshold=0.05):
-    # start_date와 pullback_date 사이의 고점을 찾습니다.
-    df_period_before_pullback = df[(df['date'] >= start_date) & (df['date'] <= pullback_date)].copy()
+def detect_breakout(df, rising_date, pullback_date, end_date, breakout_threshold=0.05):
+    # rising_date와 pullback_date 사이의 고점을 찾습니다.
+    df_period_before_pullback = df[(df['date'] >= rising_date) & (df['date'] <= pullback_date)].copy()
     max_price_before_pullback = df_period_before_pullback['close'].max()
     
     # pullback_date 이후의 데이터를 확인합니다.
@@ -100,7 +128,7 @@ def detect_breakout(df, start_date, pullback_date, end_date, breakout_threshold=
     print(f"Breakout dates: {breakout['date'].tolist()}")
     
     if not breakout.empty:
-        return True, breakout.iloc[0]['date']
+        return True, breakout.iloc[0]['date']  # breakout_date는 pullback_date 이후 첫날만 입력
     return False, None
 
 if __name__ == '__main__':
@@ -110,8 +138,7 @@ if __name__ == '__main__':
     database_buy_list = cf.MYSQL_DATABASE_BUY_LIST
     database_craw = cf.MYSQL_DATABASE_CRAW
     results_table = cf.MYSQL_RESULTS_TABLE
-
-    port = 3306
+    port = cf.MYSQL_PORT
     
     search_start_date = cf.SEARCH_START_DATE
     search_end_date = cf.SEARCH_END_DATE
@@ -210,57 +237,71 @@ if __name__ == '__main__':
                                             rising_period = df_period[df_period['price_change'] >= price_change_threshold]
                                             rising_days = (rising_period['date'].max() - rising_period['date'].min()).days
                                             
-                                            # 60일 이동평균선이 상승하는지 확인
-                                            df['clo60'] = df['close'].rolling(window=60).mean()
-                                            df['clo60_slope'] = df['clo60'].diff()
-                                            is_clo60_rising = df['clo60_slope'].iloc[-1] > 0
-                                            
-                                            if rising_days > 5 and is_clo60_rising:
-                                                start_date = find_starting_point(df, first_date, new_last_date)
-                                                if start_date is None:
-                                                    start_date = find_starting_point_ma(df)
-                                                if last_date is None or (start_date - last_date).days >= 180:
-                                                    print("급등 시작일:", start_date)
-                                                    
-                                                    # 1차 상승 후 눌림목 감지
-                                                    pullback_signal, pullback_date = detect_pullback(df, start_date, new_last_date)
-                                                    pullback_price = df[df['date'] == pullback_date]['close'].iloc[0]
-                                                    
-                                                    # 전고 돌파 감지
-                                                    print(f"Detecting breakout for {table_name} from {pullback_date} to {new_last_date}")
-                                                    breakout_signal, breakout_date = detect_breakout(df, start_date, pullback_date, new_last_date)
-                                                    
-                                                    # pullback 이후 상승율 계산
-                                                    pullback_change = (max_price / pullback_price - 1) * 100
-                                                    
-                                                    # pullback_change가 50% 이상인 경우만 처리
-                                                    if pullback_change >= 50:
-                                                        results.append({
-                                                            'code_name': table_name,
-                                                            'code': row['code'],
-                                                            'first_date': first_date,
-                                                            'last_date': new_last_date,
-                                                            'start_date': start_date,
-                                                            'min_price': min_price,
-                                                            'min_price_date': min_price_date,
-                                                            'max_price': max_price,
-                                                            'max_price_date': max_price_date,
-                                                            'price_change': price_change,
-                                                            'pullback_date': pullback_date,
-                                                            'pullback_price': pullback_price,
-                                                            'pullback_change': pullback_change,
-                                                            'breakout_date': breakout_date
-                                                        })
-                                                        last_date = new_last_date
-                                                        count += 1
-                                                        print(f"Found a match: {table_name}")
+                                            # 5봉 이내에 100% 오른 종목은 제외
+                                            if rising_days <= 5:
+                                                print(f"\n{table_name} 종목의 본격적인 상승기간이 5봉 이내로 끝났습니다.")
+                                                continue
+
+                                            rising_date = find_rising_date(df, first_date, new_last_date)
+                                            if rising_date is None:
+                                                rising_date = find_rising_date_ma(df)
+                                            if last_date is None or (rising_date - last_date).days >= 180:
+                                                print("급등 시작일:", rising_date)
+                                                
+                                                # 1차 상승 후 눌림목 감지
+                                                pullback_signal, pullback_date = detect_pullback(df, rising_date, new_last_date)
+                                                if pullback_signal:
+                                                    if pullback_date in df['date'].values:
+                                                        pullback_price = df[df['date'] == pullback_date]['close'].iloc[0]
+                                                        
+                                                        # 전고 돌파 감지
+                                                        print(f"Detecting breakout for {table_name} from {pullback_date} to {new_last_date}")
+                                                        breakout_signal, breakout_date = detect_breakout(df, rising_date, pullback_date, new_last_date)
+                                                        
+                                                        # pullback 이후 상승율 계산
+                                                        pullback_change = (max_price / pullback_price - 1) * 100
+                                                        
+                                                        # pullback_change가 50% 이상인 경우만 처리
+                                                        if pullback_change >= cf.PRICE_CHANGE_THRESHOLD_2 * 100:
+                                                            # breakout 이후 상승율 계산
+                                                            if breakout_signal:
+                                                                breakout_price = df[df['date'] == breakout_date]['close'].iloc[0]
+                                                                breakout_change = (max_price / breakout_price - 1) * 100
+                                                                
+                                                                # breakout_change가 50% 이상인 경우만 처리
+                                                                if breakout_change >= cf.PRICE_CHANGE_THRESHOLD_3 * 100:
+                                                                    results.append({
+                                                                        'code_name': table_name,
+                                                                        'code': row['code'],
+                                                                        'first_date': first_date,
+                                                                        'last_date': new_last_date,
+                                                                        'rising_date': rising_date,
+                                                                        'min_price': min_price,
+                                                                        'min_price_date': min_price_date,
+                                                                        'max_price': max_price,
+                                                                        'max_price_date': max_price_date,
+                                                                        'price_change': price_change,
+                                                                        'pullback_date': pullback_date,
+                                                                        'pullback_price': pullback_price,
+                                                                        'pullback_change': pullback_change,
+                                                                        'breakout_date': breakout_date,
+                                                                        'breakout_price': breakout_price,
+                                                                        'breakout_change': breakout_change
+                                                                    })
+                                                                    last_date = new_last_date
+                                                                    count += 1
+                                                                    print(f"Found a match: {table_name}")
+                                                                else:
+                                                                    print(f"\n{table_name} 종목의 breakout 이후 상승율이 {cf.PRICE_CHANGE_THRESHOLD_3 * 100}% 미만입니다.")
+                                                            else:
+                                                                print(f"\n{table_name} 종목의 breakout_signal이 없습니다.")
+                                                        else:
+                                                            print(f"\n{table_name} 종목의 pullback 이후 상승율이 {cf.PRICE_CHANGE_THRESHOLD_2 * 100}% 미만입니다.")
                                                     else:
-                                                        print(f"\n{table_name} 종목의 pullback 이후 상승율이 50% 미만입니다.")
+                                                        print(f"\n{table_name} 종목의 pullback_date가 데이터프레임에 존재하지 않습니다.")
                                             else:
                                                 if rising_days <= 5:
                                                     print(f"\n{table_name} 종목의 본격적인 상승기간이 5봉 이내로 끝났습니다.")
-                                                if not is_clo60_rising:
-                                                    print(f"\n{table_name} 종목의 60일 이동평균선이 상승하지 않았습니다.")
                                         else:
                                             print(f"\n{table_name} 종목의 가격 변화가 75% 미만입니다.")
                                 else:
@@ -274,13 +315,13 @@ if __name__ == '__main__':
             if results:
                 print("\n조건을 충족한 종목 목록:")
                 for result in results:
-                    print(f"종목명: {result['code_name']}, 코드: {result['code']}, 시작일: {result['first_date']}, 종료일: {result['last_date']}, 급등 시작일: {result['start_date']}, 최저가: {result['min_price']} (날짜: {result['min_price_date']}), 최고가: {result['max_price']} (날짜: {result['max_price_date']}), 상승율: {result['price_change']:.2f}%, 눌림목 날짜: {result['pullback_date']}, 눌림목 가격: {result['pullback_price']}, pullback 이후 상승율: {result['pullback_change']:.2f}%, 전고 돌파 날짜: {result['breakout_date']}")
+                    print(f"종목명: {result['code_name']}, 코드: {result['code']}, 시작일: {result['first_date']}, 종료일: {result['last_date']}, 급등 시작일: {result['rising_date']}, 최저가: {result['min_price']} (날짜: {result['min_price_date']}), 최고가: {result['max_price']} (날짜: {result['max_price_date']}), 상승율: {result['price_change']:.2f}%, 눌림목 날짜: {result['pullback_date']}, 눌림목 가격: {result['pullback_price']}, pullback 이후 상승율: {result['pullback_change']:.2f}%, 전고 돌파 날짜: {result['breakout_date']}")
 
                 # 결과를 MySQL에 저장
                 save_results_to_mysql(results, host, user, password, database_buy_list, results_table)
 
                 # 검색결과를 텔레그램 메시지 보내기
-                message = f"Finding completed.\nTotal : {len(results)}"
+                message = f"Finding completed.\nTotal : {len(results)}\n{search_start_date}부터 {search_end_date}까지"
                 send_telegram_message(telegram_token, telegram_chat_id, message)
 
             else:

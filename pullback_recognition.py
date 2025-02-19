@@ -88,11 +88,6 @@ def extract_features(df):
         # 거래량 변화 계산
         df.loc[:, 'Volume_Change'] = df['volume'].pct_change()
         
-        # Lag features
-        # df.loc[:, 'Lag_1'] = df['close'].shift(1)
-        # df.loc[:, 'Lag_2'] = df['close'].shift(2)
-        # df.loc[:, 'Lag_3'] = df['close'].shift(3)
-        
         # Rolling window features
         df.loc[:, 'Rolling_Std_5'] = df['close'].rolling(window=5).std()
         df.loc[:, 'Rolling_Std_20'] = df['close'].rolling(window=20).std()
@@ -126,6 +121,10 @@ def label_data(df, pullback_date, breakout_date=None):
                 df.loc[(df['date'] >= pullback_date) & (df['date'] <= pullback_date + timedelta(days=5)), 'Label'] = 1
         
         print(f'Data labeled: {len(df)} rows')
+        # print("First 5 rows of the labeled data:")
+        # print(df[['date', 'Label']].head())  # 라벨링된 데이터프레임의 첫 5줄을 출력
+        # print("Last 10 rows of the labeled data:")
+        # print(df[['date', 'Label']].tail(10))  # 라벨링된 데이터프레임의 마지막 10줄을 출력
         return df
     except Exception as e:
         print(f'Error labeling data: {e}')
@@ -140,7 +139,7 @@ def train_model(X, y, use_saved_params=True):
         
         param_file = 'best_params.pkl'
         
-        if use_saved_params and o#s.path.exists(param_file):
+        if use_saved_params and os.path.exists(param_file):
             print("Loading saved parameters...")
             best_params = joblib.load(param_file)
             model = xgb.XGBClassifier(**best_params, random_state=42)
@@ -289,7 +288,7 @@ if __name__ == '__main__':
                     
                     if not df.empty:
                         # Train model
-                        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Lag_1', 'Lag_2', 'Lag_3', 'Rolling_Std_5', 'Rolling_Std_20']]
+                        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
                         y = df['Label']
                         model = train_model(X, y, use_saved_params)
                         
