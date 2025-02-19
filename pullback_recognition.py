@@ -12,7 +12,7 @@ from mysql_loader import list_tables_in_database, load_data_from_mysql
 from test_mysql_loader import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def load_filtered_stock_results(host, user, password, database, table):
     try:
@@ -55,56 +55,105 @@ def extract_features(df):
     try:
         print(f'Original data rows: {len(df)}')
         print('Extracting features')
+
+        # 필요한 열만 선택
+        df = df[['date', 'close', 'open', 'high', 'low', 'volume']].copy()
+
+        # 날짜 오름차순 정렬
+        df = df.sort_values(by='date')
+
+        # 이동평균 계산
         df['MA5'] = df['close'].rolling(window=5).mean()
+        df['MA10'] = df['close'].rolling(window=10).mean()
         df['MA20'] = df['close'].rolling(window=20).mean()
         df['MA60'] = df['close'].rolling(window=60).mean()
         df['MA120'] = df['close'].rolling(window=120).mean()
+        
+        # 이동평균과 종가의 비율 계산
+        df['Close_to_MA5'] = df['close'] / df['MA5']
+        df['Close_to_MA10'] = df['close'] / df['MA10']
+        df['Close_to_MA20'] = df['close'] / df['MA20']
+        df['Close_to_MA60'] = df['close'] / df['MA60']
+        df['Close_to_MA120'] = df['close'] / df['MA120']
+        
+        # 거래량 이동평균 계산
+        df['Volume_MA5'] = df['volume'].rolling(window=5).mean()
+        df['Volume_MA10'] = df['volume'].rolling(window=10).mean()
+        df['Volume_MA20'] = df['volume'].rolling(window=20).mean()
+        df['Volume_MA60'] = df['volume'].rolling(window=60).mean()
+        df['Volume_MA120'] = df['volume'].rolling(window=120).mean()
+        
+        # 거래량과 이동평균의 비율 계산
+        df['Volume_to_MA5'] = df['volume'] / df['Volume_MA5']
+        df['Volume_to_MA10'] = df['volume'] / df['Volume_MA10']
+        df['Volume_to_MA20'] = df['volume'] / df['Volume_MA20']
+        df['Volume_to_MA60'] = df['volume'] / df['Volume_MA60']
+        df['Volume_to_MA120'] = df['volume'] / df['Volume_MA120']
+        
+        # 추가 비율 계산
+        df['Open_to_LastClose'] = df['open'] / df['close'].shift(1)
+        df['High_to_Close'] = df['high'] / df['close']
+        df['Low_to_Close'] = df['low'] / df['close']
+        
         df['Volume_Change'] = df['volume'].pct_change()
         df['Price_Change'] = df['close'].pct_change()
         
-        # MACD 계산
-        df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = df['EMA12'] - df['EMA26']
-        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        # # MACD 계산
+        # df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
+        # df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
+        # df['MACD'] = df['EMA12'] - df['EMA26']
+        # df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
         
-        # RSI 계산
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        # # RSI 계산
+        # delta = df['close'].diff()
+        # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        # rs = gain / loss
+        # df['RSI'] = 100 - (100 / (1 + rs))
         
-        # 로그수익률 계산
-        df['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
+        # # 로그수익률 계산
+        # df['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
         
-        # 변동성 계산 (20일 기준)
-        df['Volatility'] = df['Log_Return'].rolling(window=20).std()
+        # # 변동성 계산 (20일 기준)
+        # df['Volatility'] = df['Log_Return'].rolling(window=20).std()
         
-        # 거래량 변화 계산
-        df['Volume_Change'] = df['volume'].pct_change()
-        
-        # Lag features
-        df['Lag_1'] = df['close'].shift(1)
-        df['Lag_2'] = df['close'].shift(2)
-        df['Lag_3'] = df['close'].shift(3)
-        
-        # Rolling window features
-        df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
-        df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
+        # # Rolling window features
+        # df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
+        # df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
         
         df = df.dropna()
-        print(f'Features extracted: {len(df)} rows')
+        print(f'Features extracted: {len(df)}')
         return df
     except Exception as e:
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
-def label_data(df):
+def label_data(df, start_date, pullback_date, breakout_date=None):
     try:
         print('Labeling data')
         df['Label'] = 0  # 기본값을 0으로 설정
-        df.iloc[-5:, df.columns.get_loc('Label')] = 1  # 마지막 5개를 1로 설정 (5일 이내에 급등할 것으로 예상)
+        df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
+        start_date = pd.to_datetime(start_date).date()
+        pullback_date = pd.to_datetime(pullback_date).date()
+        
+        if breakout_date:
+            breakout_date = pd.to_datetime(breakout_date).date()
+            df.loc[(df['date'] >= start_date) & (df['date'] < pullback_date), 'Label'] = 1
+            df.loc[(df['date'] >= pullback_date) & (df['date'] < breakout_date), 'Label'] = 2
+        else:
+            # 5일 이동 평균이 증가하는 시점을 찾음
+            df['MA5'] = df['close'].rolling(window=5).mean()
+            df['MA5_diff'] = df['MA5'].diff()
+            increasing_ma5_date = df.loc[(df['date'] > pullback_date) & (df['MA5_diff'] > 0), 'date'].min()
+            
+            if pd.notna(increasing_ma5_date):
+                df.loc[(df['date'] >= start_date) & (df['date'] < pullback_date), 'Label'] = 1
+                df.loc[(df['date'] >= pullback_date) & (df['date'] <= increasing_ma5_date), 'Label'] = 2
+            else:
+                # 만약 5일 이동 평균이 증가하는 시점을 찾지 못하면 기본적으로 5일 후까지 라벨링
+                df.loc[(df['date'] >= start_date) & (df['date'] < pullback_date), 'Label'] = 1
+                df.loc[(df['date'] >= pullback_date) & (df['date'] <= pullback_date + timedelta(days=5)), 'Label'] = 2
+        
         print(f'Data labeled: {len(df)} rows')
         return df
     except Exception as e:
@@ -127,16 +176,11 @@ def train_model(X, y, use_saved_params=True):
         else:
             # 하이퍼파라미터 그리드 설정
             param_grid = {
-                'n_estimators': [100],
-                'max_depth': [3],
-                'learning_rate': [0.01],
-                'subsample': [0.8],
-                'colsample_bytree': [0.8]
-                #'n_estimators': [100, 200, 300],
-                #'max_depth': [3, 6, 9],
-                #'learning_rate': [0.01, 0.1, 0.2],
-                #'subsample': [0.8, 1.0],
-                #'colsample_bytree': [0.8, 1.0]
+                'n_estimators': [100, 200, 300],
+                'max_depth': [3, 6, 9],
+                'learning_rate': [0.01, 0.1, 0.2],
+                'subsample': [0.8, 1.0],
+                'colsample_bytree': [0.8, 1.0]
             }
             
             # GridSearchCV를 사용하여 하이퍼파라미터 튜닝
@@ -166,7 +210,10 @@ def train_model(X, y, use_saved_params=True):
 def predict_pattern(model, df, stock_code):
     try:
         print('Predicting patterns')
-        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Lag_1', 'Lag_2', 'Lag_3', 'Rolling_Std_5', 'Rolling_Std_20']]
+        X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120',
+                'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
+                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change']]
+                #'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         predictions = model.predict(X)
@@ -255,8 +302,10 @@ if __name__ == '__main__':
             # (900d일 전부터 급등 시작까지, feature extracted는 500봉 정도 나와야함)
             for index, row in tqdm(filtered_results.iterrows(), total=filtered_results.shape[0], desc="Training models"):
                 code_name = row['code_name']
-                end_date = row['start_date']
-                start_date = end_date - pd.Timedelta(days=900)
+                pullback_date = row['pullback_date']
+                breakout_date = row['breakout_date'] if 'breakout_date' in row and pd.notnull(row['breakout_date']) else None
+                end_date = breakout_date if breakout_date else pullback_date + timedelta(days=5)
+                start_date = end_date - timedelta(days=900)
                 
                 print(f"\nLoading data for {code_name} from {start_date} to {end_date}")
                 df = load_daily_craw_data(host, user, password, database_craw, code_name, start_date, end_date)
@@ -268,11 +317,14 @@ if __name__ == '__main__':
                     df = extract_features(df)
                     
                     # Label data
-                    df = label_data(df)
+                    df = label_data(df, start_date, pullback_date, breakout_date)
                     
                     if not df.empty:
                         # Train model
-                        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Lag_1', 'Lag_2', 'Lag_3', 'Rolling_Std_5', 'Rolling_Std_20']]
+                        X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120',
+                                'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
+                                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change']]
+                                #MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
                         y = df['Label']
                         model = train_model(X, y, use_saved_params)
                         
@@ -285,6 +337,8 @@ if __name__ == '__main__':
                             print(result)
                             # 훈련 정보 출력
                             print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                        else:
+                            print(f"Model training failed for {code_name}")
                 else:
                     print(f"No data found for {code_name} in the specified date range")
             
@@ -292,12 +346,13 @@ if __name__ == '__main__':
             print(f"Successful models: {successful_models}")
             
             # 모델 저장
-            model.save_model(model_filename)
-            print(f"Model saved as {model_filename}")
+            if model:
+                model.save_model(model_filename)
+                print(f"Model saved as {model_filename}")
 
             # 훈련이 끝난 후 텔레그램 메시지 보내기
-        message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
-        send_telegram_message(telegram_token, telegram_chat_id, message)
+            message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
         
         # 훈련이 끝난 후 사용자 입력 대기
         input("훈련이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
@@ -323,7 +378,7 @@ if __name__ == '__main__':
             for validation_date in pd.date_range(start=validation_start_date, end=validation_end_date):
                 if validation_date in processed_dates:
                     continue  # 이미 처리된 날짜는 건너뜀
-                start_date_750 = validation_date - pd.Timedelta(days=750)
+                start_date_750 = validation_date - timedelta(days=750)
                 df = load_daily_craw_data(host, user, password, database_craw, table_name, start_date_750)
                 
                 if not df.empty:
@@ -401,11 +456,12 @@ if __name__ == '__main__':
             send_telegram_message(telegram_token, telegram_chat_id, message)
         else:
             print("No patterns found in the validation period")
-        
+            # 패턴이 없으면 텔레그램 메시지 보내기
+            message = "No patterns found in the validation period"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
         if pattern_found:
             print("\nPattern was found during validation.")
         else:
             print("\nNo pattern was found during validation.")
     else:
         print("Error in main execution: No filtered stock results loaded")
-
