@@ -98,28 +98,28 @@ def extract_features(df):
         df['Volume_Change'] = df['volume'].pct_change()
         df['Price_Change'] = df['close'].pct_change()
         
-        # # MACD 계산
-        # df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-        # df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-        # df['MACD'] = df['EMA12'] - df['EMA26']
-        # df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        # MACD 계산
+        df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = df['EMA12'] - df['EMA26']
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
         
-        # # RSI 계산
-        # delta = df['close'].diff()
-        # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        # rs = gain / loss
-        # df['RSI'] = 100 - (100 / (1 + rs))
+        # RSI 계산
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
         
-        # # 로그수익률 계산
-        # df['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
+        # 로그수익률 계산
+        df['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
         
-        # # 변동성 계산 (20일 기준)
-        # df['Volatility'] = df['Log_Return'].rolling(window=20).std()
+        # 변동성 계산 (20일 기준)
+        df['Volatility'] = df['Log_Return'].rolling(window=20).std()
         
-        # # Rolling window features
-        # df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
-        # df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
+        # Rolling window features
+        df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
+        df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
         
         df = df.dropna()
         print(f'Features extracted: {len(df)}')
@@ -128,18 +128,20 @@ def extract_features(df):
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
-def label_data(df, start_date, pullback_date, breakout_date=None):
+def label_data(df, rising_date, pullback_date, breakout_date=None):
     try:
         print('Labeling data')
         df['Label'] = 0  # 기본값을 0으로 설정
         df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
-        start_date = pd.to_datetime(start_date).date()
+        rising_date = pd.to_datetime(rising_date).date()
         pullback_date = pd.to_datetime(pullback_date).date()
+        
+        print(f'Rising date: {rising_date}')  # rising_date 출력
         
         if breakout_date:
             breakout_date = pd.to_datetime(breakout_date).date()
-            df.loc[(df['date'] >= start_date) & (df['date'] < pullback_date), 'Label'] = 1
-            df.loc[(df['date'] >= pullback_date) & (df['date'] < breakout_date), 'Label'] = 2
+            df.loc[(df['date'] >= rising_date) & (df['date'] < pullback_date), 'Label'] = 1
+            df.loc[(df['date'] >= pullback_date) & (df['date'] <= breakout_date), 'Label'] = 2
         else:
             # 5일 이동 평균이 증가하는 시점을 찾음
             df['MA5'] = df['close'].rolling(window=5).mean()
@@ -147,14 +149,21 @@ def label_data(df, start_date, pullback_date, breakout_date=None):
             increasing_ma5_date = df.loc[(df['date'] > pullback_date) & (df['MA5_diff'] > 0), 'date'].min()
             
             if pd.notna(increasing_ma5_date):
-                df.loc[(df['date'] >= start_date) & (df['date'] < pullback_date), 'Label'] = 1
+                df.loc[(df['date'] >= rising_date) & (df['date'] < pullback_date), 'Label'] = 1
                 df.loc[(df['date'] >= pullback_date) & (df['date'] <= increasing_ma5_date), 'Label'] = 2
             else:
                 # 만약 5일 이동 평균이 증가하는 시점을 찾지 못하면 기본적으로 5일 후까지 라벨링
-                df.loc[(df['date'] >= start_date) & (df['date'] < pullback_date), 'Label'] = 1
+                df.loc[(df['date'] >= rising_date) & (df['date'] < pullback_date), 'Label'] = 1
                 df.loc[(df['date'] >= pullback_date) & (df['date'] <= pullback_date + timedelta(days=5)), 'Label'] = 2
         
         print(f'Data labeled: {len(df)} rows')
+
+        # 첫 5개와 마지막 10개의 라벨 출력
+        print("First 5 labels:")
+        print(df[['date', 'Label']].head(5))
+        print("Last 10 labels:")
+        print(df[['date', 'Label']].tail(10))
+        
         return df
     except Exception as e:
         print(f'Error labeling data: {e}')
@@ -212,8 +221,8 @@ def predict_pattern(model, df, stock_code):
         print('Predicting patterns')
         X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120',
                 'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
-                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change']]
-                #'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
+                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
+                'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         predictions = model.predict(X)
@@ -299,9 +308,9 @@ if __name__ == '__main__':
             use_saved_params = input("Do you want to use saved hyperparameters? (yes/no): ").strip().lower() == 'yes'
             
             # filtered_results 데이터프레임의 각 행을 반복하며 종목별로 데이터를 로드하고 모델을 훈련 
-            # (900d일 전부터 급등 시작까지, feature extracted는 500봉 정도 나와야함)
             for index, row in tqdm(filtered_results.iterrows(), total=filtered_results.shape[0], desc="Training models"):
                 code_name = row['code_name']
+                rising_date = row['rising_date']
                 pullback_date = row['pullback_date']
                 breakout_date = row['breakout_date'] if 'breakout_date' in row and pd.notnull(row['breakout_date']) else None
                 end_date = breakout_date if breakout_date else pullback_date + timedelta(days=5)
@@ -317,14 +326,14 @@ if __name__ == '__main__':
                     df = extract_features(df)
                     
                     # Label data
-                    df = label_data(df, start_date, pullback_date, breakout_date)
+                    df = label_data(df, rising_date, pullback_date, breakout_date)
                     
                     if not df.empty:
                         # Train model
                         X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120',
                                 'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
-                                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change']]
-                                #MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
+                                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
+                                'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
                         y = df['Label']
                         model = train_model(X, y, use_saved_params)
                         
@@ -354,9 +363,6 @@ if __name__ == '__main__':
             message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
         
-        # 훈련이 끝난 후 사용자 입력 대기
-        input("훈련이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
-
         # 검증을 위해 cf.py 파일의 설정에 따라 데이터를 불러옴
         print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
         validation_start_date = cf.VALIDATION_START_DATE
@@ -396,14 +402,8 @@ if __name__ == '__main__':
                             result = result[~result['date'].isin(processed_dates)]
                             validation_results = pd.concat([validation_results, result])
                             processed_dates.update(result['date'])  # 처리된 날짜를 추가
-                            print("\nPattern found, stopping further validation.")
+                            print("\nPattern found.")
                             pattern_found += 1
-                            # 패턴 발견 제한을 제거하거나 증가시킵니다.
-                            # if pattern_found >= 50:
-                            #     break
-            # 패턴 발견 제한을 제거하거나 증가시킵니다.
-            # if pattern_found >= 50:
-            #     break
         
         if not validation_results.empty:
             validation_results['date'] = pd.to_datetime(validation_results['date'])
@@ -411,8 +411,14 @@ if __name__ == '__main__':
             print("\nValidation results:")
             print(validation_results)
             
+            # Validation 끝난 후 텔레그램 메시지 보내기
+            message = f"Validation completed. {validation_results}"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
             # 검증이 끝난 후 사용자 입력 대기
-            input("검증이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
+            #input("검증이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
+
+            # 검증이 끝난 후 사용자 입력 대기
+            #input("검증이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
             
             # 향후 60일 동안의 최고 수익률 검증
             print("\nEvaluating performance for the next 60 days")
@@ -452,12 +458,12 @@ if __name__ == '__main__':
             save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)
 
              # Performance 끝난 후 텔레그램 메시지 보내기
-            message = f"Performance completed.\nTotal perfornance: {len(performance_df)}\n Performance results: {performance_df}"
+            message = f"Performance completed. {results_table}\nTotal perfornance: {len(performance_df)}\n Performance results: {performance_df}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
         else:
             print("No patterns found in the validation period")
             # 패턴이 없으면 텔레그램 메시지 보내기
-            message = "No patterns found in the validation period"
+            message = f"No patterns found in the validation period\n{results_table}\n{validation_start_date} to {validation_end_date}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
         if pattern_found:
             print("\nPattern was found during validation.")
