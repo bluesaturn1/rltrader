@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.layers import Dense, LSTM, Conv1D, MaxPooling1D, Flatten, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
@@ -109,6 +109,11 @@ def prepare_data(df):
     # 무한대 값이나 너무 큰 값 제거
     numeric_df = numeric_df.replace([np.inf, -np.inf], np.nan).dropna()
     
+    # 데이터가 비어 있는지 확인
+    if numeric_df.empty:
+        print("No numeric data to process.")
+        return None, None, None
+    
     # Feature scaling
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(numeric_df)
@@ -127,18 +132,22 @@ def create_lstm_cnn_model(input_shape):
     model = Sequential()
     model.add(Conv1D(filters=64, kernel_size=2, activation='relu', input_shape=input_shape))
     model.add(MaxPooling1D(pool_size=2))
+    model.add(Dropout(0.2))  # 드롭아웃 레이어 추가
     model.add(LSTM(50, return_sequences=True))
+    model.add(Dropout(0.2))  # 드롭아웃 레이어 추가
     model.add(LSTM(50))
     model.add(Dense(1, activation='sigmoid'))
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
-def train_lstm_cnn_model(X, y):
-    if len(X) == 0 or len(y) == 0:
+def train_lstm_cnn_model(X, y, model=None):
+    if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("Not enough data to train the model.")
         return None
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = create_lstm_cnn_model((X_train.shape[1], X_train.shape[2]))
+    
+    if model is None:
+        model = create_lstm_cnn_model((X_train.shape[1], X_train.shape[2]))
     
     # 조기 종료 콜백 추가
     early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
@@ -185,6 +194,7 @@ if __name__ == '__main__':
         
         total_models = 0
         successful_models = 0
+        pattern_found = False  # 패턴 발견 여부를 추적하는 변수
         
         # 오늘 날짜를 포함한 모델 파일 경로 생성
         today = datetime.today().strftime('%Y-%m-%d')
@@ -210,6 +220,7 @@ if __name__ == '__main__':
         if choice == 'yes':
             # filtered_results 데이터프레임의 각 행을 반복하며 종목별로 데이터를 로드하고 모델을 훈련 
             # (920일 전부터 급등 시작까지, feature extracted는 실제로는 500봉 정도 나옴)
+            model = None
             for index, row in tqdm(filtered_results.iterrows(), total=filtered_results.shape[0], desc="Training models"):
                 code_name = row['code_name']
                 start_date = row['start_date']
@@ -230,8 +241,12 @@ if __name__ == '__main__':
                         # Prepare data
                         X, y, scaler = prepare_data(df)
                         
+                        if X is None or y is None:
+                            print(f"Skipping {code_name} due to insufficient data")
+                            continue
+                        
                         # Train model
-                        model = train_lstm_cnn_model(X, y)
+                        model = train_lstm_cnn_model(X, y, model)
                         
                         if model:
                             total_models += 1
@@ -295,6 +310,10 @@ if __name__ == '__main__':
                         # Prepare data
                         X, y, scaler = prepare_data(df)
                         
+                        if X is None or y is None:
+                            print(f"Skipping {table_name} due to insufficient data")
+                            continue
+                        
                         # Predict patterns
                         if len(X) > 0:
                             predictions = model.predict(X)
@@ -321,6 +340,7 @@ if __name__ == '__main__':
                                 result = result[~result['date'].isin(processed_dates)]
                                 validation_results = pd.concat([validation_results, result])
                                 processed_dates.update(result['date'])  # 처리된 날짜를 추가
+                                pattern_found = True  # 패턴 발견 여부 업데이트
                                 print("\nPattern found, stopping further validation.")
         
         if not validation_results.empty:
@@ -374,7 +394,9 @@ if __name__ == '__main__':
             save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)
         else:
             print("No patterns found in the validation period")
-        
+            # 패턴이 없으면 텔레그램 메시지 보내기
+            message = "No patterns found in the validation period"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
         if pattern_found:
             print("\nPattern was found during validation.")
         else:
