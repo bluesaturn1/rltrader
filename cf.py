@@ -1,12 +1,25 @@
 # -*- conding: utf-8 -*-
 
+# 검색 설정
+SEARCH_START_DATE = '2020-01-01'
+SEARCH_END_DATE = '2022-12-31'
+PERIOD = 60
+PRICE_CHANGE_THRESHOLD = 1.0
+PRICE_CHANGE_THRESHOLD_2 = 0.75
+PRICE_CHANGE_THRESHOLD_3 = 0.5
+
 # MySQL 설정
 MYSQL_HOST = '192.168.0.72'
 MYSQL_USER = 'bluesaturn'
 MYSQL_PASSWORD = 'bluesaturn1+'
+MYSQL_PORT = 3306
 MYSQL_DATABASE_BUY_LIST = 'daily_buy_list'
 MYSQL_DATABASE_CRAW = 'daily_craw'
-MYSQL_RESULTS_TABLE = 'pullback_results_2'
+MYSQL_RESULTS_TABLE = 'pullback_results_2' # 60이동제외 2000~2022
+
+# 검증 설정
+VALIDATION_START_DATE = '2023-01-16'
+VALIDATION_END_DATE = '2023-01-31'
 
 # 텔레그램 봇 토큰과 채팅 ID 설정
 # macmini_k

@@ -330,6 +330,9 @@ if __name__ == '__main__':
                     
                     if not df.empty:
                         # Train model
+<<<<<<< HEAD
+                        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
+=======
                         X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120',
                                 'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
                                 'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
