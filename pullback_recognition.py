@@ -223,6 +223,7 @@ def predict_pattern(model, df, stock_code):
                 'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
                 'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
                 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
+                #'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20'
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         predictions = model.predict(X)
@@ -330,13 +331,10 @@ if __name__ == '__main__':
                     
                     if not df.empty:
                         # Train model
-<<<<<<< HEAD
-                        X = df[['MA5', 'MA20', 'MA60', 'MA120', 'Volume_Change', 'Price_Change', 'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
-=======
                         X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120',
-                                'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
-                                'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
-                                'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
+                        'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
+                        'Volume_to_MA60', 'Volume_to_MA120', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change', 
+                        'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20']]
                         y = df['Label']
                         model = train_model(X, y, use_saved_params)
                         
@@ -378,7 +376,6 @@ if __name__ == '__main__':
         
         total_stock_items = len(stock_items)
         print(stock_items.head())  # 반환된 데이터프레임의 첫 몇 줄을 출력하여 확인
-        pattern_found = 0  # 패턴 발견 여부를 추적하는 변수
         processed_dates = set()  # 이미 처리된 날짜를 추적하는 집합
         for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
             table_name = row.code_name
@@ -406,22 +403,20 @@ if __name__ == '__main__':
                             validation_results = pd.concat([validation_results, result])
                             processed_dates.update(result['date'])  # 처리된 날짜를 추가
                             print("\nPattern found.")
-                            pattern_found += 1
-        
+                                
         if not validation_results.empty:
             validation_results['date'] = pd.to_datetime(validation_results['date'])
             validation_results = validation_results.sort_values(by='date')
             print("\nValidation results:")
             print(validation_results)
             
+            # 검증된 종목의 개수 출력
+            unique_stock_codes = validation_results['stock_code'].nunique()
+            print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
+            
             # Validation 끝난 후 텔레그램 메시지 보내기
-            message = f"Validation completed. {validation_results}"
+            message = f"Validation completed. {validation_results}\nNumber of unique stock codes found during validation: {unique_stock_codes}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
-            # 검증이 끝난 후 사용자 입력 대기
-            #input("검증이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
-
-            # 검증이 끝난 후 사용자 입력 대기
-            #input("검증이 끝났습니다. 계속하려면 Enter 키를 누르세요...")
             
             # 향후 60일 동안의 최고 수익률 검증
             print("\nEvaluating performance for the next 60 days")
@@ -460,17 +455,14 @@ if __name__ == '__main__':
             # 성능 결과를 데이터베이스에 저장
             save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)
 
-             # Performance 끝난 후 텔레그램 메시지 보내기
-            message = f"Performance completed. {results_table}\nTotal perfornance: {len(performance_df)}\n Performance results: {performance_df}"
+            # Performance 끝난 후 텔레그램 메시지 보내기
+            message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}\n Performance results: {performance_df}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
         else:
             print("No patterns found in the validation period")
             # 패턴이 없으면 텔레그램 메시지 보내기
             message = f"No patterns found in the validation period\n{results_table}\n{validation_start_date} to {validation_end_date}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
-        if pattern_found:
-            print("\nPattern was found during validation.")
-        else:
-            print("\nNo pattern was found during validation.")
+
     else:
         print("Error in main execution: No filtered stock results loaded")
