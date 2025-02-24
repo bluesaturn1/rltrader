@@ -197,25 +197,17 @@ if __name__ == '__main__':
                                 future_df['loss_rate'] = (future_df['low'] - initial_price) / initial_price * 100
                                 max_loss_rate = future_df['loss_rate'].min()
                                 
-                                # Calculate estimated profit rate
-                                estimated_profit_rate = max_profit_rate - abs(max_loss_rate)
+                                performance_results.append({
+                                    'code_name': code_name,
+                                    'signal_date': dense_date_str,
+                                    'initial_price': initial_price,
+                                    'max_profit_rate': max_profit_rate,
+                                    'max_loss_rate': max_loss_rate,
+                                })
                                 
-                                if estimated_profit_rate >= 30:  # Only save if estimated profit rate is 30% or higher
-                                    performance_results.append({
-                                        'code_name': code_name,
-                                        'signal_date': dense_date_str,
-                                        'initial_price': initial_price,
-                                        'max_profit_rate': max_profit_rate,
-                                        'max_loss_rate': max_loss_rate,
-                                        'estimated_profit_rate': estimated_profit_rate,  # Add estimated profit rate
-                                    })
-                                
-                                    print(f"\nFound signal for {code_name} on {dense_date_str}")
-                                    print(f"Max Profit Rate: {max_profit_rate:.2f}%")
-                                    print(f"Max Loss Rate: {max_loss_rate:.2f}%")
-                                    print(f"Estimated Profit Rate: {estimated_profit_rate:.2f}%")
-                                else:
-                                    print(f"\nSkipping {code_name} on {dense_date_str} due to low estimated profit rate ({estimated_profit_rate:.2f}%)")
+                                print(f"\nFound signal for {code_name} on {dense_date_str}")
+                                print(f"Max Profit Rate: {max_profit_rate:.2f}%")
+                                print(f"Max Loss Rate: {max_loss_rate:.2f}%")
                         
                 else:
                     print(f"No data found for {code_name} in the specified date range.")

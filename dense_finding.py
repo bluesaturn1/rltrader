@@ -200,7 +200,7 @@ if __name__ == '__main__':
                                 # Calculate estimated profit rate
                                 estimated_profit_rate = max_profit_rate - abs(max_loss_rate)
                                 
-                                if estimated_profit_rate >= 30:  # Only save if estimated profit rate is 30% or higher
+                                if estimated_profit_rate >= 50:  # Only save if estimated profit rate is 30% or higher
                                     performance_results.append({
                                         'code_name': code_name,
                                         'signal_date': dense_date_str,
