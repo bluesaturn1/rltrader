@@ -201,15 +201,20 @@ if __name__ == '__main__':
                                 estimated_profit_rate = max_profit_rate - abs(max_loss_rate)
                                 
                                 if estimated_profit_rate >= 50:  # Only save if estimated profit rate is 30% or higher
-                                    performance_results.append({
-                                        'code_name': code_name,
-                                        'signal_date': dense_date_str,
-                                        'initial_price': initial_price,
-                                        'max_profit_rate': max_profit_rate,
-                                        'max_loss_rate': max_loss_rate,
-                                        'estimated_profit_rate': estimated_profit_rate,  # Add estimated profit rate
-                                    })
-                                
+                                    existing_entry = next((item for item in performance_results if item['code_name'] == code_name and item['signal_date_last'] == dense_date_str), None)
+                                    if existing_entry:
+                                        existing_entry['signal_date_last'] = dense_date_str
+                                    else:
+                                        performance_results.append({
+                                            'code_name': code_name,
+                                            'signal_date': dense_date_str,
+                                            'signal_date_last': dense_date_str,
+                                            'initial_price': initial_price,
+                                            'max_profit_rate': max_profit_rate,
+                                            'max_loss_rate': max_loss_rate,
+                                            'estimated_profit_rate': estimated_profit_rate,  # Add estimated profit rate
+                                        })
+                                    
                                     print(f"\nFound signal for {code_name} on {dense_date_str}")
                                     print(f"Max Profit Rate: {max_profit_rate:.2f}%")
                                     print(f"Max Loss Rate: {max_loss_rate:.2f}%")
@@ -223,7 +228,7 @@ if __name__ == '__main__':
             # 검색된 종목의 개수와 종목 이름 출력
             print(f"\nTotal number of stocks processed: {len(performance_results)}")
             for result in performance_results:
-                print(f"Stock: {result['code_name']}, Date: {result['signal_date']}, "
+                print(f"Stock: {result['code_name']}, Date: {result['signal_date']} to {result['signal_date_last']}, "
                       f"Profit: {result['max_profit_rate']:.2f}%, Loss: {result['max_loss_rate']:.2f}%")
             
             if performance_results:

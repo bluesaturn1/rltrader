@@ -2,17 +2,20 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.metrics import f1_score, make_scorer
 import os
 import joblib
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from test_mysql_loader import get_stock_items  # get_stock_items 함수를 가져옵니다.
+from dense_finding import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
+from imblearn.over_sampling import SMOTE
+
 
 def load_filtered_stock_results(host, user, password, database, table):
     try:
@@ -56,7 +59,7 @@ def extract_features(df):
         print('Extracting features')
 
         # 필요한 열만 선택
-        df = df[['date', 'close', 'open', 'high', 'low', 'volume']].copy()
+        df = df[COLUMNS_CHART_DATA].copy()
         # 날짜 오름차순 정렬
         df = df.sort_values(by='date')
 
@@ -94,145 +97,283 @@ def extract_features(df):
         
         # 추가 비율 계산
         df['Open_to_LastClose'] = df['open'] / df['close'].shift(1)
+        df['Close_to_LastClose'] = df['close'] / df['close'].shift(1)
         df['High_to_Close'] = df['high'] / df['close']
         df['Low_to_Close'] = df['low'] / df['close']
         
-        df['Volume_Change'] = df['volume'].pct_change()
-        df['Price_Change'] = df['close'].pct_change()
-        
-        # # MACD 계산
-        # df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-        # df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-        # df['MACD'] = df['EMA12'] - df['EMA26']
-        # df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        
-        # # RSI 계산
-        # delta = df['close'].diff()
-        # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        # rs = gain / loss
-        # df['RSI'] = 100 - (100 / (1 + rs))
-        
-        # # 로그수익률 계산
-        # df['Log_Return'] = np.log(df['close'] / df['close'].shift(1))
-        
-        # # 변동성 계산 (20일 기준)
-        # df['Volatility'] = df['Log_Return'].rolling(window=20).std()
-        
-        # # Rolling window features
-        # df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
-        # df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
+        df['Volume_to_LastVolume'] = df['volume'] / df['volume'].shift(1)
         
         df = df.dropna()
         print(f'Features extracted: {len(df)}')
+        # print(df.head())
+        # print(df.tail())
         return df
     except Exception as e:
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
-def label_data(df, signal_date):
+def label_data(df, signal_dates):
     try:
         print('Labeling data')
         
         df['Label'] = 0  # 기본값을 0으로 설정
         df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
-        signal_date = pd.to_datetime(signal_date).date()
         
-        print(f'Signal date: {signal_date}')  # signal_date 출력
+        # signal_dates를 올바른 형식으로 변환하고, 잘못된 형식의 날짜를 처리
+        valid_signal_dates = []
+        for date in signal_dates:
+            try:
+                valid_date = pd.to_datetime(date).date()
+                valid_signal_dates.append(valid_date)
+            except ValueError:
+                print(f"Invalid date format: {date}")
         
-        # signal_date에 해당하는 행만 1로 설정
-        df.loc[df['date'] == signal_date, 'Label'] = 1
+        # 날짜 정렬
+        valid_signal_dates.sort()
+        print(f'Signal dates: {valid_signal_dates}')
+        
+        if len(valid_signal_dates) > 0:
+            # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
+            date_groups = []
+            current_group = [valid_signal_dates[0]]
+            
+            for i in range(1, len(valid_signal_dates)):
+                days_diff = (valid_signal_dates[i] - valid_signal_dates[i-1]).days
+                if days_diff >= 90:  # 3개월 이상 차이
+                    date_groups.append(current_group)
+                    current_group = [valid_signal_dates[i]]
+                else:
+                    current_group.append(valid_signal_dates[i])
+            
+            date_groups.append(current_group)
+            
+            print(f"Found {len(date_groups)} separate signal groups")
+            
+            # 각 그룹 처리
+            for group_idx, group in enumerate(date_groups):
+                print(f"Processing group {group_idx+1} with {len(group)} signals")
+                
+                # 그룹의 시작과 끝 날짜
+                start_date = min(group)
+                end_date = max(group)
+                
+                # 원래 신호 날짜들을 3등분하여 라벨 부여
+                n = len(group)
+                first_third = group[:n//3] if n > 2 else group
+                second_third = group[n//3:2*n//3] if n > 2 else []
+                last_third = group[2*n//3:] if n > 2 else []
+                
+                # 원본 신호 날짜에 라벨(1,2,3) 부여
+                signal_labels = {}
+                for date in first_third:
+                    signal_labels[date] = 1
+                for date in second_third:
+                    signal_labels[date] = 2
+                for date in last_third:
+                    signal_labels[date] = 3
+                
+                # 각 신호 날짜를 데이터프레임에 적용
+                sorted_dates = df[(df['date'] >= start_date) & (df['date'] <= end_date)]['date'].unique()
+                sorted_dates.sort()
+                
+                # 각 날짜에 대해 처리
+                current_label = 0
+                for date in sorted_dates:
+                    if date in signal_labels:
+                        # 신호 날짜인 경우 해당 라벨로 설정
+                        current_label = signal_labels[date]
+                    
+                    # 현재 라벨(이전 신호와 같은 라벨)을 적용
+                    df.loc[df['date'] == date, 'Label'] = current_label
         
         print(f'Data labeled: {len(df)} rows')
 
+        # 라벨 분포 출력
+        print("Label distribution:")
+        print(df['Label'].value_counts())
+        
         # 첫 5개와 마지막 10개의 라벨 출력
         print("First 5 labels:")
-        print(df[['date', 'Label']].head(5))
+        print(df[['date', 'Label']].head(3))
         print("Last 10 labels:")
-        print(df[['date', 'Label']].tail(10))
-        
+        print(df[['date', 'Label']].tail(15))
+
         return df
     except Exception as e:
         print(f'Error labeling data: {e}')
+        import traceback
+        traceback.print_exc()  # 상세한 traceback 정보 출력
         return pd.DataFrame()
 
-def train_model(X, y, use_saved_params=True):
+def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
     try:
         print('Training model')
-        # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        y = y[X.index]  # X와 동일한 인덱스를 유지
+        y = y[X.index]
         
-        param_file = 'best_params.pkl'
+        print("Class distribution in y:")
+        print(y.value_counts())
         
-        # 아래 and를 &&로 바꾸지 말 것
+        # Calculate class weights
+        class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
+        for class_label, weight in y.value_counts(normalize=True).items():
+            class_weights[class_label] = weight
+        
+        sample_weights = np.array([1/class_weights[yi] for yi in y])
+        
+        print(f"use_saved_params: {use_saved_params}")  # use_saved_params 값 출력
+        print(f"param_file exists: {os.path.exists(param_file)}")  # param_file 존재 여부 출력
+        
         if use_saved_params and os.path.exists(param_file):
             print("Loading saved parameters...")
-            best_params = joblib.load(param_file)
-            model = xgb.XGBClassifier(**best_params, random_state=42)
+            try:
+                best_params = joblib.load(param_file)
+                model = xgb.XGBClassifier(
+                    **best_params,
+                    random_state=42,
+                    objective='multi:softmax',
+                    num_class=4,
+                    eval_metric='mlogloss'
+                )
+                print("Model loaded with saved parameters.")
+            except Exception as e:
+                print(f"Error loading saved parameters: {e}")
+                model = None  # 로딩 실패 시 model을 None으로 설정
         else:
-            # 하이퍼파라미터 그리드 설정
+            print("Tuning hyperparameters...")
             param_grid = {
                 'n_estimators': [100, 200, 300],
                 'max_depth': [3, 6, 9],
                 'learning_rate': [0.01, 0.1, 0.2],
                 'subsample': [0.8, 1.0],
-                'colsample_bytree': [0.8, 1.0]
+                'colsample_bytree': [0.8, 1.0],
+                'min_child_weight': [1, 3, 5]
             }
             
-            # GridSearchCV를 사용하여 하이퍼파라미터 튜닝
-            model = xgb.XGBClassifier(random_state=42)
-            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=2)
-            grid_search.fit(X, y)
+            base_model = xgb.XGBClassifier(
+                random_state=42,
+                objective='multi:softmax',
+                num_class=4,
+                eval_metric='mlogloss'
+            )
             
-            # 최적의 하이퍼파라미터 출력
+            grid_search = GridSearchCV(
+                estimator=base_model,
+                param_grid=param_grid,
+                cv=3,
+                scoring='f1_weighted',
+                n_jobs=-1,
+                verbose=2
+            )
+            
+            # Train with sample weights
+            grid_search.fit(X, y, sample_weight=sample_weights)
+            
             best_params = grid_search.best_params_
             print(f'Best parameters found: {best_params}')
-            
-            # 최적의 하이퍼파라미터 저장
             joblib.dump(best_params, param_file)
-            
-            # 최적의 모델로 훈련
             model = grid_search.best_estimator_
+            print("Model trained with new parameters.")
         
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        print(f'Accuracy: {accuracy_score(y_test, y_pred)}')
+        if model is not None:
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            # Calculate weights for training set
+            train_class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
+            for class_label, weight in y_train.value_counts(normalize=True).items():
+                train_class_weights[class_label] = weight
+            
+            train_weights = np.array([1/train_class_weights[yi] for yi in y_train])
+            
+            # Train final model with weights
+            model.fit(X_train, y_train, sample_weight=train_weights)
+            
+            y_pred = model.predict(X_test)
+            print(f'Accuracy: {accuracy_score(y_test, y_pred)}')
+            print('Classification Report:')
+            print(classification_report(y_test, y_pred))
+        else:
+            print("Model training failed.")
+        
         return model
     except Exception as e:
         print(f'Error training model: {e}')
+        import traceback
+        traceback.print_exc()  # 상세한 traceback 정보 출력
         return None
 
-def predict_pattern(model, df, stock_code):
+def predict_pattern(model, df, stock_code, use_data_dates=True):
     try:
         print('Predicting patterns')
-        X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'MA240', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120', 'Close_to_MA240', 
-                'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_MA240', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
-                'Volume_to_MA60', 'Volume_to_MA120', 'Volume_to_MA240', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
-                ]]
-                #'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20'
+        if model is None:
+            print("Model is None, cannot predict patterns.")
+            return pd.DataFrame(columns=['date', 'stock_code'])
+        X = df[COLUMNS_TRAINING_DATA]
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         predictions = model.predict(X)
         df = df.loc[X.index]  # 동일한 인덱스를 유지
         df['Prediction'] = predictions
-        print(f'Patterns predicted: {df["Prediction"].sum()} matches found')
+        print(f'Patterns predicted: {len(predictions)} total predictions')
+        print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
         
-        # 날짜 형식을 datetime으로 변환
-        df['date'] = pd.to_datetime(df['date'])
-        
-        # 검증 기간 동안의 패턴 필터링
-        recent_patterns = df[(df['Prediction'] == 1) & (df['date'] >= cf.VALIDATION_START_DATE) & (df['date'] <= cf.VALIDATION_END_DATE)]
-        
-        # 날짜와 종목 코드만 출력
-        recent_patterns = recent_patterns.copy()
-        recent_patterns['stock_code'] = stock_code
-        result = recent_patterns[['date', 'stock_code']]
-        return result
+        # 날짜 형식을 안전하게 변환
+        try:
+            # MySQL의 YYYYMMDD 형식 문자열을 datetime으로 변환
+            if df['date'].dtype == 'object':
+                # YYYYMMDD 형식의 문자열을 datetime으로 변환
+                df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
+            elif not pd.api.types.is_datetime64_any_dtype(df['date']):
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            
+            # NaT 값 제거
+            df = df.dropna(subset=['date'])
+            print(f"Date range in data: {df['date'].min()} to {df['date'].max()}")
+            
+            # 검증 기간 설정 부분 수정
+            if use_data_dates:
+                # 데이터의 최신 날짜 이후로 예측 검증 기간 설정 (훈련 직후 검증용)
+                max_date = df['date'].max()
+                validation_start_date = max_date + pd.Timedelta(days=1)
+                validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
+            else:
+                # cf.py에 설정된 검증 기간 사용 (외부 검증용)
+                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
+                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+            
+            print(f"Validation period: {validation_start_date} to {validation_end_date}")
+            
+            # 검증 기간 동안의 패턴 필터링 (Prediction이 0보다 큰 경우만)
+            recent_patterns = df[
+                (df['Prediction'] > 0) & 
+                (df['date'] >= validation_start_date) & 
+                (df['date'] <= validation_end_date)
+            ].copy()
+            
+            print(f'Filtered patterns in validation period: {len(recent_patterns)}')
+            
+            if not recent_patterns.empty:
+                recent_patterns['stock_code'] = stock_code
+                result = recent_patterns[['date', 'stock_code']]
+                print(f'Found patterns for {stock_code}:')
+                print(result)
+                return result
+            else:
+                print(f'No patterns found for {stock_code} in validation period')
+                return pd.DataFrame(columns=['date', 'stock_code'])
+                
+        except Exception as e:
+            print(f"Error in date processing: {e}")
+            print(f"Debug info - df['date'] sample: {df['date'].head()}")
+            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE}")
+            return pd.DataFrame(columns=['date', 'stock_code'])
+            
     except Exception as e:
         print(f'Error predicting patterns: {e}')
-        return pd.DataFrame()
+        print(f'Error type: {type(e).__name__}')
+        import traceback
+        print(f'Stack trace:\n{traceback.format_exc()}')
+        return pd.DataFrame(columns=['date', 'stock_code'])
 
 def evaluate_performance(df, start_date, end_date):
     #print(df)
@@ -240,7 +381,7 @@ def evaluate_performance(df, start_date, end_date):
         print('Evaluating performance')
         df['date'] = pd.to_datetime(df['date'])
         df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-        if df.empty:
+        if (df.empty):
             print(f"No data found between {start_date} and {end_date}")
             return None
         max_close = df['close'].max()
@@ -278,6 +419,18 @@ if __name__ == '__main__':
     telegram_token = cf.TELEGRAM_BOT_TOKEN
     telegram_chat_id = cf.TELEGRAM_CHAT_ID
     
+    COLUMNS_CHART_DATA = ['date', 'open', 'high', 'low', 'close', 'volume']
+
+    COLUMNS_TRAINING_DATA = [
+        'Open_to_LastClose', 'High_to_Close', 'Low_to_Close',
+        'Close_to_LastClose', 'Volume_to_LastVolume',
+        'Close_to_MA5', 'Volume_to_MA5',
+        'Close_to_MA10', 'Volume_to_MA10',
+        'Close_to_MA20', 'Volume_to_MA20',
+        'Close_to_MA60', 'Volume_to_MA60',
+        'Close_to_MA120', 'Volume_to_MA120',
+        'Close_to_MA240', 'Volume_to_MA240',
+        ]
     print("Starting pattern recognition")
     
     # Load filtered stock results
@@ -290,26 +443,56 @@ if __name__ == '__main__':
         successful_models = 0
         current_date = datetime.now().strftime('%Y%m%d')
         model_filename = os.path.join(model_dir, f"{results_table}_{current_date}.json")
+        param_file = 'best_params.pkl'
+        
+        print(f"Model filename: {model_filename}")  # 모델 파일 경로 출력
         
         # 사용자에게 트레이닝 자료를 다시 트레이닝할 것인지, 저장된 것을 불러올 것인지 물어봄
         choice = input("Do you want to retrain the model? (yes/no): ").strip().lower()
+        print(f"User choice: {choice}")  # choice 변수 값 출력
+        print(f"Model file exists: {os.path.exists(model_filename)}")  # 모델 파일 존재 여부 출력
         
         # 아래 and를 &&로 바꾸지 말 것
         if choice == 'no' and os.path.exists(model_filename):
             print("Loading saved model...")
             model = xgb.XGBClassifier()
             model.load_model(model_filename)
+            best_model = model  # 로드한 모델을 best_model에도 저장
+            best_accuracy = 0.0  # 저장된 모델을 로드할 때 best_accuracy 초기화
         else:
+            print("Retraining the model...")
             # 하이퍼파라미터 튜닝 결과를 재사용할 것인지 물어봄
-            use_saved_params = input("Do you want to use saved hyperparameters? (yes/no): ").strip().lower() == 'yes'
+            use_saved_params = True  # use_saved_params를 True로 초기화
             
-            # filtered_results 데이터프레임의 각 행을 반복하며 종목별로 데이터를 로드하고 모델을 훈련 
-            for index, row in tqdm(filtered_results.iterrows(), total=filtered_results.shape[0], desc="Training models"):
-                code_name = row['code_name']
-                signal_date = row['signal_date']
+            # filtered_results 데이터프레임을 종목별로 그룹화
+            grouped_results = filtered_results.groupby('code_name')
+            
+            # 첫 번째 종목에 대해서만 use_saved_params를 False로 설정
+            first_stock = True
+            best_model = None  # 가장 좋은 성능을 보인 모델을 저장할 변수
+            best_accuracy = 0  # 가장 좋은 성능(정확도)을 저장할 변수
+            
+            # 각 그룹의 데이터를 반복하며 종목별로 데이터를 로드하고 모델을 훈련
+            for code_name, group in tqdm(grouped_results, desc="Training models"):
+                signal_dates = group['signal_date'].tolist()
                 
-                # 문자열 형태의 signal_date를 datetime 객체로 변환
-                end_date = datetime.strptime(signal_date, '%Y%m%d').date()
+                # 문자열 형태의 signal_dates를 datetime 객체로 변환
+                valid_signal_dates = []
+                for date in signal_dates:
+                    if isinstance(date, str):
+                        try:
+                            valid_date = pd.to_datetime(date.strip(), format='%Y%m%d').date()
+                            valid_signal_dates.append(valid_date)
+                        except ValueError:
+                            print(f"Invalid date format: {date}")
+                    else:
+                        print(f"Invalid date type: {date}")
+            
+                if not valid_signal_dates:
+                    print(f"No valid signal dates for {code_name}")
+                    continue
+                
+                end_date = max(valid_signal_dates)
                 start_date = end_date - timedelta(days=1200)
                 
                 # print(f"\nLoading data for {code_name} from {start_date} to {end_date}")
@@ -323,17 +506,14 @@ if __name__ == '__main__':
                     df = extract_features(df)
                     
                     # Label data
-                    df = label_data(df, signal_date)
+                    df = label_data(df, valid_signal_dates)
                     
                     if not df.empty:
                         # Train model
-                        X = df[['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'MA240', 'Close_to_MA5', 'Close_to_MA10', 'Close_to_MA20', 'Close_to_MA60', 'Close_to_MA120', 'Close_to_MA240', 
-                        'Volume_MA5', 'Volume_MA10', 'Volume_MA20', 'Volume_MA60', 'Volume_MA120', 'Volume_MA240', 'Volume_to_MA5', 'Volume_to_MA10', 'Volume_to_MA20',
-                        'Volume_to_MA60', 'Volume_to_MA120', 'Volume_to_MA240', 'Open_to_LastClose', 'High_to_Close', 'Low_to_Close', 'Volume_Change', 'Price_Change',
-                        ]]
+                        X = df[COLUMNS_TRAINING_DATA]
                         y = df['Label']
                         #'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20'                                    y = df['Label']
-                        model = train_model(X, y, use_saved_params)
+                        model = train_model(X, y, use_saved_params and not first_stock, param_file)
                         
                         total_models += 1
                         
@@ -344,27 +524,54 @@ if __name__ == '__main__':
                             print(result)
                             # 훈련 정보 출력
                             print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                            
+                            # 가장 좋은 모델을 선택하기 위해 성능 평가
+                            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                            y_pred = model.predict(X_test)
+                            accuracy = accuracy_score(y_test, y_pred)
+                            
+                            if accuracy > best_accuracy or best_model is None:
+                                best_model = model
+                                best_accuracy = accuracy
+                                print(f"New best model found for {code_name} with accuracy: {accuracy:.4f}")
                         else:
                             print(f"Model training failed for {code_name}")
+                    else:
+                        print(f"No data found for {code_name} in the specified date range")
                 else:
                     print(f"No data found for {code_name} in the specified date range")
             
-            print(f"\nTotal models trained: {total_models}")
-            print(f"Successful models: {successful_models}")
-            
-            # 모델 저장
-            if model:
-                model.save_model(model_filename)
-                print(f"Model saved as {model_filename}")
-
-            # 훈련이 끝난 후 텔레그램 메시지 보내기
-            message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
-            send_telegram_message(telegram_token, telegram_chat_id, message)
+                # 첫 번째 종목 처리 후 플래그 변경
+                first_stock = False
         
-        # 검증을 위해 cf.py 파일의 설정에 따라 데이터를 불러옴
+        print(f"\nTotal models trained: {total_models}")
+        print(f"Successful models: {successful_models}")
+        
+        # 훈련이 끝난 후 텔레그램 메시지 보내기
+        message = f"Training completed.\nTotal models trained: {total_models}\nSuccessful models: {successful_models}"
+        send_telegram_message(telegram_token, telegram_chat_id, message)
+
+        # 모델 저장 (이제 best_model을 사용)
+        if best_model:
+            print("Saving best model...")  # 모델 저장 시 디버깅 메시지 추가
+            best_model.save_model(model_filename)
+            print(f"Best model saved as {model_filename} with accuracy: {best_accuracy:.4f}")
+            message = f"Best model saved as {model_filename} with accuracy: {best_accuracy:.4f}"
+            send_telegram_message(telegram_token, telegram_chat_id, message)
+            
+            # 검증에서 사용할 모델을 best_model로 설정
+            model = best_model
+        else:
+            print("No model to save.")  # 모델이 None인 경우 메시지 출력
+            pause = input("Press Enter to continue...")  # 사용자 입력 대기
+            message = "No model to save."
+            send_telegram_message(telegram_token, telegram_chat_id, message)
+
+        
+        # (훈련을 마친 후) 검증을 위해 cf.py 파일의 설정에 따라 데이터를 불러옴
         print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
-        validation_start_date = cf.VALIDATION_START_DATE
-        validation_end_date = cf.VALIDATION_END_DATE
+        validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
+        validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
         validation_results = pd.DataFrame()
         
         # 모든 종목에 대해 검증 데이터 로드
@@ -393,7 +600,7 @@ if __name__ == '__main__':
                     
                     if not df.empty:
                         # Predict patterns
-                        result = predict_pattern(model, df, table_name)
+                        result = predict_pattern(model, df, table_name, use_data_dates=False)
                         if not result.empty:
                             # 중복된 날짜가 추가되지 않도록 수정
                             result = result[~result['date'].isin(processed_dates)]
