@@ -49,7 +49,49 @@ def load_data_from_mysql(host, user, password, database, table, start_date, end_
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
-def extract_features(df):
+def label_data(df, rising_date, pullback_date, breakout_date=None):
+    try:
+        print('Labeling data')
+        df['Label'] = 0  # 기본값을 0으로 설정
+        df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
+        rising_date = pd.to_datetime(rising_date).date()
+        pullback_date = pd.to_datetime(pullback_date).date()
+        
+        print(f'Rising date: {rising_date}')  # rising_date 출력
+        
+        if breakout_date:
+            breakout_date = pd.to_datetime(breakout_date).date()
+            df.loc[(df['date'] >= rising_date) & (df['date'] < pullback_date), 'Label'] = 1
+            df.loc[(df['date'] >= pullback_date) & (df['date'] <= breakout_date), 'Label'] = 2
+        else:
+            # 5일 이동 평균이 증가하는 시점을 찾음
+            df['MA5'] = df['close'].rolling(window=5).mean()
+            df['MA5_diff'] = df['MA5'].diff()
+            increasing_ma5_date = df.loc[(df['date'] > pullback_date) & (df['MA5_diff'] > 0), 'date'].min()
+            
+            if pd.notna(increasing_ma5_date):
+                df.loc[(df['date'] >= rising_date) & (df['date'] < pullback_date), 'Label'] = 1
+                df.loc[(df['date'] >= pullback_date) & (df['date'] <= increasing_ma5_date), 'Label'] = 2
+            else:
+                # 만약 5일 이동 평균이 증가하는 시점을 찾지 못하면 기본적으로 5일 후까지 라벨링
+                df.loc[(df['date'] >= rising_date) & (df['date'] < pullback_date), 'Label'] = 1
+                df.loc[(df['date'] >= pullback_date) & (df['date'] <= pullback_date + timedelta(days=5)), 'Label'] = 2
+        
+        print(f'Data labeled: {len(df)} rows')
+
+        # 첫 5개와 마지막 10개의 라벨 출력
+        print("First 5 labels:")
+        print(df[['date', 'Label']].head(5))
+        print("Last 10 labels:")
+        print(df[['date', 'Label']].tail(10))
+        
+        return df
+    except Exception as e:
+        print(f'Error labeling data: {e}')
+        return pd.DataFrame()
+
+        
+def extract_features(df, rising_date=None, pullback_date=None, breakout_date=None):
     try:
         print(f'Original data rows: {len(df)}')
         print('Extracting features')
@@ -91,9 +133,9 @@ def extract_features(df):
         df['Rolling_Std_5'] = df['close'].rolling(window=5).std()
         df['Rolling_Std_20'] = df['close'].rolling(window=20).std()
         
-        # 마지막 5봉을 레이블링
-        df['Label'] = 0
-        df.loc[df.index[-5:], 'Label'] = 1
+        # Pullback recognition logic
+        if rising_date is not None and pullback_date is not None:
+            df = label_data(df, rising_date, pullback_date, breakout_date)
         
         df = df.dropna()
         print(f'Features extracted: {len(df)} rows')
@@ -105,6 +147,18 @@ def extract_features(df):
 def prepare_data(df):
     # 숫자형 데이터만 선택
     numeric_df = df.select_dtypes(include=[np.number])
+    
+    # Print column names and shape before processing
+    print(f"Columns before processing: {numeric_df.columns}")
+    print(f"Shape before processing: {numeric_df.shape}")
+    
+    # 'Label' 열이 있는지 확인하고 마지막 열로 이동
+    if 'Label' in numeric_df.columns:
+        label_col = numeric_df.pop('Label')
+        numeric_df['Label'] = label_col
+    else:
+        # Validation 단계에서는 임시 레이블 생성
+        numeric_df['Label'] = 0
     
     # 무한대 값이나 너무 큰 값 제거
     numeric_df = numeric_df.replace([np.inf, -np.inf], np.nan).dropna()
@@ -118,13 +172,20 @@ def prepare_data(df):
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(numeric_df)
     
+    # Print shape after scaling
+    print(f"Shape after scaling: {scaled_data.shape}")
+    
     # Prepare sequences
     X, y = [], []
     sequence_length = 60
     for i in range(sequence_length, len(scaled_data)):
-        X.append(scaled_data[i-sequence_length:i])
-        y.append(scaled_data[i, -1])  # Assuming the label is the last column
+        X.append(scaled_data[i-sequence_length:i, :-1])  # 레이블 제외한 모든 특성
+        y.append(scaled_data[i, -1])  # 마지막 열(Label)
     X, y = np.array(X), np.array(y)
+    
+    # Print final shapes
+    print(f"Final X shape: {X.shape}")
+    print(f"Final y shape: {y.shape}")
     
     return X, y, scaler
 
@@ -219,11 +280,12 @@ if __name__ == '__main__':
         
         if choice == 'yes':
             # filtered_results 데이터프레임의 각 행을 반복하며 종목별로 데이터를 로드하고 모델을 훈련 
-            # (920일 전부터 급등 시작까지, feature extracted는 실제로는 500봉 정도 나옴)
             model = None
-            for index, row in tqdm(filtered_results.iterrows(), total=filtered_results.shape[0], desc="Training models"):
-                code_name = row['code_name']
-                start_date = row['start_date']
+            for row in tqdm(filtered_results.itertuples(index=False, name='Pandas'), 
+                            total=filtered_results.shape[0], 
+                            desc="Training models"):
+                code_name = row.code_name
+                start_date = row.breakout_date
                 end_date = start_date - pd.Timedelta(days=920)
                 
                 print(f"\nLoading data for {code_name} from {end_date} to {start_date}")
@@ -233,7 +295,7 @@ if __name__ == '__main__':
                     print(f"Data for {code_name} loaded successfully")
                     
                     # Extract features
-                    df = extract_features(df)
+                    df = extract_features(df, row.rising_date, row.pullback_date, row.breakout_date)
                     
                     if not df.empty and len(df) > 400:
                         print(f"Features extracted for {code_name}: {len(df)} rows")
@@ -259,10 +321,13 @@ if __name__ == '__main__':
             print(f"Successful models: {successful_models}")
             
             # 모델 저장
-            os.makedirs('./models', exist_ok=True)
-            model_filename = f'./models/lstm_cnn_model_{today}_{successful_models}.h5'
-            model.save(model_filename)
-            print(f"Model saved as {model_filename}")
+            if model:
+                os.makedirs('./models', exist_ok=True)
+                model_filename = f'./models/lstm_cnn_model_{today}_{successful_models}.h5'
+                model.save(model_filename)
+                print(f"Model saved as {model_filename}")
+            else:
+                print("No model was trained successfully.")
         
         # 훈련된 모델의 수를 출력
         print(f"Total models trained: {total_models}")
@@ -288,7 +353,7 @@ if __name__ == '__main__':
         total_stock_items = len(stock_items)
         print(stock_items.head())  # 반환된 데이터프레임의 첫 몇 줄을 출력하여 확인
         processed_dates = set()  # 이미 처리된 날짜를 추적하는 집합
-        for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
+        for idx, row in tqdm(enumerate(stock_items.itertuples(index=True, name='Pandas')), total=total_stock_items, desc="Validating patterns"):
             table_name = row.code_name
             print(f"Loading validation data for {table_name} ({idx + 1}/{total_stock_items})")
             
@@ -304,6 +369,7 @@ if __name__ == '__main__':
                     print(f"Number of rows loaded for {table_name}: {len(df)}")
                     
                     # Extract features
+                    # validation 단계에서는 rising_date, pullback_date, breakout_date를 사용할 수 없으므로 None으로 설정
                     df = extract_features(df)
                     
                     if not df.empty:
@@ -356,9 +422,9 @@ if __name__ == '__main__':
             print("\nEvaluating performance for the next 60 days")
             performance_results = []
           
-            for index, row in enumerate(validation_results.iterrows()):
-                code_name = row[1]['stock_code']
-                pattern_date = row[1]['date']
+            for index, row in enumerate(validation_results.itertuples(index=False, name='Pandas')):
+                code_name = row.stock_code
+                pattern_date = row.date
                 performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
                 performance_end_date = performance_start_date + pd.Timedelta(days=60)
                 
