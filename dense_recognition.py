@@ -449,16 +449,47 @@ if __name__ == '__main__':
         # 사용자에게 트레이닝 자료를 다시 트레이닝할 것인지, 저장된 것을 불러올 것인지 물어봄
         choice = input("Do you want to retrain the model? (yes/no): ").strip().lower()
         print(f"User choice: {choice}")  # choice 변수 값 출력
-        print(f"Model file exists: {os.path.exists(model_filename)}")  # 모델 파일 존재 여부 출력
         
         # 아래 and를 &&로 바꾸지 말 것
-        if choice == 'no' and os.path.exists(model_filename):
-            print("Loading saved model...")
-            model = xgb.XGBClassifier()
-            model.load_model(model_filename)
-            best_model = model  # 로드한 모델을 best_model에도 저장
-            best_accuracy = 0.0  # 저장된 모델을 로드할 때 best_accuracy 초기화
+        if choice == 'no':
+            # 모델 디렉토리에서 사용 가능한 모델 파일 목록 가져오기
+            available_models = [f for f in os.listdir(model_dir) if f.endswith('.json')]
+            
+            if not available_models:
+                print("No saved models found. Will train a new model.")
+                retrain = True
+            else:
+                print("\nAvailable models:")
+                for i, model_file in enumerate(available_models):
+                    print(f"{i+1}. {model_file}")
+                
+                # 사용자에게 모델 선택 요청
+                while True:
+                    try:
+                        model_choice = input("\nSelect a model number (or type 'new' to train a new model): ")
+                        
+                        if model_choice.lower() == 'new':
+                            retrain = True
+                            break
+                        else:
+                            model_index = int(model_choice) - 1
+                            if 0 <= model_index < len(available_models):
+                                model_filename = os.path.join(model_dir, available_models[model_index])
+                                print(f"Loading model: {model_filename}")
+                                model = xgb.XGBClassifier()
+                                model.load_model(model_filename)
+                                best_model = model  # 로드한 모델을 best_model에도 저장
+                                best_accuracy = 0.0  # 저장된 모델을 로드할 때 best_accuracy 초기화
+                                retrain = False
+                                break
+                            else:
+                                print("Invalid model number. Please try again.")
+                    except ValueError:
+                        print("Invalid input. Please enter a number or 'new'.")
         else:
+            retrain = True
+        
+        if retrain:
             print("Retraining the model...")
             # 하이퍼파라미터 튜닝 결과를 재사용할 것인지 물어봄
             use_saved_params = True  # use_saved_params를 True로 초기화
@@ -471,7 +502,7 @@ if __name__ == '__main__':
             best_model = None  # 가장 좋은 성능을 보인 모델을 저장할 변수
             best_accuracy = 0  # 가장 좋은 성능(정확도)을 저장할 변수
             
-            # 각 그룹의 데이터를 반복하며 종목별로 데이터를 로드하고 모델을 훈련
+            # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
             for code_name, group in tqdm(grouped_results, desc="Training models"):
                 signal_dates = group['signal_date'].tolist()
                 
@@ -491,54 +522,64 @@ if __name__ == '__main__':
                     print(f"No valid signal dates for {code_name}")
                     continue
                 
-                end_date = max(valid_signal_dates)
-                start_date = end_date - timedelta(days=1200)
+                # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
+                date_groups = []
+                current_group = [valid_signal_dates[0]]
                 
-                # print(f"\nLoading data for {code_name} from {start_date} to {end_date}")
-                df = load_daily_craw_data(host, user, password, database_craw, code_name, start_date, end_date)
-                # print(f"load_daily_craw_data 함수에서 반환된 데이터프레임: {df}")
-            
-                if not df.empty:
-                    print(f"Data for {code_name} loaded successfully")
-                    
-                    # Extract features
-                    df = extract_features(df)
-                    
-                    # Label data
-                    df = label_data(df, valid_signal_dates)
-                    
-                    if not df.empty:
-                        # Train model
-                        X = df[COLUMNS_TRAINING_DATA]
-                        y = df['Label']
-                        #'MACD', 'Signal_Line', 'RSI', 'Log_Return', 'Volatility', 'Rolling_Std_5', 'Rolling_Std_20'                                    y = df['Label']
-                        model = train_model(X, y, use_saved_params and not first_stock, param_file)
-                        
-                        total_models += 1
-                        
-                        if model:
-                            successful_models += 1
-                            # Predict patterns
-                            result = predict_pattern(model, df, code_name)
-                            print(result)
-                            # 훈련 정보 출력
-                            print(f"Model trained for {code_name} from {start_date} to {end_date}")
-                            
-                            # 가장 좋은 모델을 선택하기 위해 성능 평가
-                            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                            y_pred = model.predict(X_test)
-                            accuracy = accuracy_score(y_test, y_pred)
-                            
-                            if accuracy > best_accuracy or best_model is None:
-                                best_model = model
-                                best_accuracy = accuracy
-                                print(f"New best model found for {code_name} with accuracy: {accuracy:.4f}")
-                        else:
-                            print(f"Model training failed for {code_name}")
+                for i in range(1, len(valid_signal_dates)):
+                    days_diff = (valid_signal_dates[i] - valid_signal_dates[i-1]).days
+                    if days_diff >= 90:  # 3개월 이상 차이
+                        date_groups.append(current_group)
+                        current_group = [valid_signal_dates[i]]
                     else:
-                        print(f"No data found for {code_name} in the specified date range")
-                else:
-                    print(f"No data found for {code_name} in the specified date range")
+                        current_group.append(valid_signal_dates[i])
+                
+                date_groups.append(current_group)
+                
+                # 각 그룹별로 별도 모델 훈련
+                for group_idx, signal_group in enumerate(date_groups):
+                    end_date = max(signal_group)  # 그룹의 마지막 날짜
+                    start_date = end_date - timedelta(days=1200)
+                    
+                    print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
+                    df = load_daily_craw_data(host, user, password, database_craw, code_name, start_date, end_date)
+                    
+                    if df.empty:
+                        continue
+                        
+                    # 특성 추출 및 라벨링
+                    df = extract_features(df)
+                    df = label_data(df, signal_group)  # 해당 그룹의 날짜만 전달
+                    
+                    if df.empty:
+                        continue
+                        
+                    # 모델 훈련
+                    X = df[COLUMNS_TRAINING_DATA]
+                    y = df['Label']
+                    model = train_model(X, y, use_saved_params and not first_stock, param_file)
+                    
+                    # 모델 평가 및 저장
+                    if model:
+                        # 기존 코드와 동일한 평가 및 저장 로직
+                        # 훈련 정보 출력
+                        print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                        
+                        # 가장 좋은 모델을 선택하기 위해 성능 평가
+                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                        y_pred = model.predict(X_test)
+                        accuracy = accuracy_score(y_test, y_pred)
+                        
+                        if accuracy > best_accuracy or best_model is None:
+                            best_model = model
+                            best_accuracy = accuracy
+                            print(f"New best model found for {code_name} with accuracy: {accuracy:.4f}")
+                    else:
+                        print(f"Model training failed for {code_name}")
+            
+                total_models += 1
+                if model:
+                    successful_models += 1
             
                 # 첫 번째 종목 처리 후 플래그 변경
                 first_stock = False

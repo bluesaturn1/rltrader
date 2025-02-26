@@ -71,7 +71,7 @@ def save_results_to_mysql(results, host, user, password, database, table):
         df_results = pd.DataFrame(results)
         
         # 결과를 MySQL 테이블에 저장 (기존 데이터 삭제 후 새로운 데이터 저장)
-        df_results.to_sql(table, con=engine, if_exists='replace', index=False)
+        df_results.to_sql(table, con=engine, if_exists='append', index=False)
         connection.close()
         print("Results saved to MySQL database successfully (old data replaced).")
     except SQLAlchemyError as e:
