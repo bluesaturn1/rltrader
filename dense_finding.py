@@ -108,6 +108,7 @@ if __name__ == '__main__':
             results = []
             performance_results = []
             count = 0
+            save_interval = 100  # 중간 저장 간격 설정
             
             # 주식 이름 목록 생성
             stock_names = stock_items_df['code_name'].tolist()
@@ -224,6 +225,12 @@ if __name__ == '__main__':
                         
                 else:
                     print(f"No data found for {code_name} in the specified date range.")
+                
+                # 중간 저장 로직 추가
+                if (index + 1) % save_interval == 0:
+                    print(f"\nSaving intermediate performance results to MySQL database at index {index + 1}...")
+                    save_results_to_mysql(performance_results, host, user, password, database_buy_list, performance_table)
+                    print("\nIntermediate performance results saved successfully.")
             
             # 검색된 종목의 개수와 종목 이름 출력
             print(f"\nTotal number of stocks processed: {len(performance_results)}")
@@ -232,9 +239,9 @@ if __name__ == '__main__':
                       f"Profit: {result['max_profit_rate']:.2f}%, Loss: {result['max_loss_rate']:.2f}%")
             
             if performance_results:
-                print("\nSaving performance results to MySQL database...")
+                print("\nSaving final performance results to MySQL database...")
                 save_results_to_mysql(performance_results, host, user, password, database_buy_list, performance_table)
-                print("\nPerformance results saved successfully.")
+                print("\nFinal performance results saved successfully.")
                 
                 # 텔레그램 메시지 보내기
                 message = f"Moving averages results: {performance_results}"
