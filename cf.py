@@ -13,8 +13,9 @@ MYSQL_PASSWORD = 'bluesaturn1+'
 MYSQL_PORT = 3306
 MYSQL_DATABASE_BUY_LIST = 'daily_buy_list'
 MYSQL_DATABASE_CRAW = 'daily_craw'
-MYSQL_RESULTS_TABLE = 'dense_performance_2000'
-MYSQL_PERFORMANCE_TABLE = 'dense_results_2000'
+FINDING_RESULTS_TABLE = 'dense_results_2013'  # finding & training table
+RECOGNITION_PERFORMANCE_TABLE = 'dense_results_202304'
+
 
 # 검색 설정
 SEARCH_START_DATE = '20000101'
@@ -32,6 +33,6 @@ MODEL_VALIDATION_END_DATE = '20230115'
 PREDICTION_VALIDATION_DAYS = 30  # 최신 데이터 이후 30일간의 예측 검증
 
 # 검증 설정
-VALIDATION_START_DATE = '20230116'
-VALIDATION_END_DATE = '20230131'    # 검증 기간 종료 날짜 설정
+VALIDATION_START_DATE = '20250220'
+VALIDATION_END_DATE = '20250226'    # 검증 기간 종료 날짜 설정
 

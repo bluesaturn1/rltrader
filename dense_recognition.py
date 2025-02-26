@@ -412,9 +412,8 @@ if __name__ == '__main__':
     password = cf.MYSQL_PASSWORD
     database_buy_list = cf.MYSQL_DATABASE_BUY_LIST
     database_craw = cf.MYSQL_DATABASE_CRAW
-    results_table = cf.MYSQL_RESULTS_TABLE
-    stock_items_table = 'stock_item_all'
-    performance_table = 'performance_results'  # 성능 결과를 저장할 테이블 이름
+    results_table = cf.FINDING_RESULTS_TABLE  # finding & training table
+    performance_table = cf.RECOGNITION_PERFORMANCE_TABLE  # 성능 결과를 저장할 테이블 이름
     # 텔레그램 설정
     telegram_token = cf.TELEGRAM_BOT_TOKEN
     telegram_chat_id = cf.TELEGRAM_CHAT_ID

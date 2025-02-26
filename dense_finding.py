@@ -83,8 +83,8 @@ if __name__ == '__main__':
     password = cf.MYSQL_PASSWORD
     database_buy_list = cf.MYSQL_DATABASE_BUY_LIST
     database_craw = cf.MYSQL_DATABASE_CRAW
-    results_table = cf.MYSQL_RESULTS_TABLE
-    performance_table = cf.MYSQL_PERFORMANCE_TABLE  # 성능 결과를 저장할 테이블 이름
+    results_table = cf.FINDING_RESULTS_TABLE
+    
     port = cf.MYSQL_PORT
     
     search_start_date = cf.SEARCH_START_DATE
@@ -229,7 +229,7 @@ if __name__ == '__main__':
                 # 중간 저장 로직 추가
                 if (index + 1) % save_interval == 0:
                     print(f"\nSaving intermediate performance results to MySQL database at index {index + 1}...")
-                    save_results_to_mysql(performance_results, host, user, password, database_buy_list, performance_table)
+                    save_results_to_mysql(performance_results, host, user, password, database_buy_list, result_table)
                     print("\nIntermediate performance results saved successfully.")
             
             # 검색된 종목의 개수와 종목 이름 출력
@@ -240,7 +240,7 @@ if __name__ == '__main__':
             
             if performance_results:
                 print("\nSaving final performance results to MySQL database...")
-                save_results_to_mysql(performance_results, host, user, password, database_buy_list, performance_table)
+                save_results_to_mysql(performance_results, host, user, password, database_buy_list, result_table)
                 print("\nFinal performance results saved successfully.")
                 
                 # 텔레그램 메시지 보내기
