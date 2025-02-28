@@ -1,11 +1,6 @@
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.metrics import f1_score, make_scorer
 import os
-import joblib
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
@@ -15,7 +10,14 @@ from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
 from imblearn.over_sampling import SMOTE
-
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.metrics import accuracy_score  # 추가
+from tensorflow.keras.layers import InputLayer
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.layers import BatchNormalization
 
 def load_filtered_stock_results(host, user, password, database, table):
     try:
@@ -105,86 +107,34 @@ def extract_features(df):
         
         df = df.dropna()
         print(f'Features extracted: {len(df)}')
-        # print(df.head())
-        # print(df.tail())
+        
+        # 정규화 추가
+        from sklearn.preprocessing import MinMaxScaler
+        scaler = MinMaxScaler()
+        numeric_columns = df[COLUMNS_TRAINING_DATA].columns
+        df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
+        
         return df
     except Exception as e:
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
-def label_data(df, signal_dates):
+def label_data(df, valid_signal_dates, estimated_profit_rates):
     try:
         print('Labeling data')
         
-        df['Label'] = 0  # 기본값을 0으로 설정
+        # 기본값을 0으로 설정
+        df['Label'] = 0
         df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
         
-        # signal_dates를 올바른 형식으로 변환하고, 잘못된 형식의 날짜를 처리
-        valid_signal_dates = []
-        for date in signal_dates:
-            try:
-                valid_date = pd.to_datetime(date).date()
-                valid_signal_dates.append(valid_date)
-            except ValueError:
-                print(f"Invalid date format: {date}")
+        # 디버깅 정보 추가
+        print(f"Number of signal dates: {len(valid_signal_dates)}")
+        print(f"Number of estimated profit rates: {len(estimated_profit_rates)}")
         
-        # 날짜 정렬
-        valid_signal_dates.sort()
-        print(f'Signal dates: {valid_signal_dates}')
+        # 각 신호 날짜에 대해 estimated_profit_rate를 라벨로 설정
+        signal_date_to_profit_rate = dict(zip(valid_signal_dates, estimated_profit_rates))
         
-        if len(valid_signal_dates) > 0:
-            # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
-            date_groups = []
-            current_group = [valid_signal_dates[0]]
-            
-            for i in range(1, len(valid_signal_dates)):
-                days_diff = (valid_signal_dates[i] - valid_signal_dates[i-1]).days
-                if days_diff >= 90:  # 3개월 이상 차이
-                    date_groups.append(current_group)
-                    current_group = [valid_signal_dates[i]]
-                else:
-                    current_group.append(valid_signal_dates[i])
-            
-            date_groups.append(current_group)
-            
-            print(f"Found {len(date_groups)} separate signal groups")
-            
-            # 각 그룹 처리
-            for group_idx, group in enumerate(date_groups):
-                print(f"Processing group {group_idx+1} with {len(group)} signals")
-                
-                # 그룹의 시작과 끝 날짜
-                start_date = min(group)
-                end_date = max(group)
-                
-                # 원래 신호 날짜들을 3등분하여 라벨 부여
-                n = len(group)
-                first_third = group[:n//3] if n > 2 else group
-                second_third = group[n//3:2*n//3] if n > 2 else []
-                last_third = group[2*n//3:] if n > 2 else []
-                
-                # 원본 신호 날짜에 라벨(1,2,3) 부여
-                signal_labels = {}
-                for date in first_third:
-                    signal_labels[date] = 1
-                for date in second_third:
-                    signal_labels[date] = 2
-                for date in last_third:
-                    signal_labels[date] = 3
-                
-                # 각 신호 날짜를 데이터프레임에 적용
-                sorted_dates = df[(df['date'] >= start_date) & (df['date'] <= end_date)]['date'].unique()
-                sorted_dates.sort()
-                
-                # 각 날짜에 대해 처리
-                current_label = 0
-                for date in sorted_dates:
-                    if date in signal_labels:
-                        # 신호 날짜인 경우 해당 라벨로 설정
-                        current_label = signal_labels[date]
-                    
-                    # 현재 라벨(이전 신호와 같은 라벨)을 적용
-                    df.loc[df['date'] == date, 'Label'] = current_label
+        df['Label'] = df['date'].map(signal_date_to_profit_rate).fillna(0)
         
         print(f'Data labeled: {len(df)} rows')
 
@@ -194,9 +144,9 @@ def label_data(df, signal_dates):
         
         # 첫 5개와 마지막 10개의 라벨 출력
         print("First 5 labels:")
-        print(df[['date', 'Label']].head(3))
+        print(df[['date', 'Label']].head(5))
         print("Last 10 labels:")
-        print(df[['date', 'Label']].tail(15))
+        print(df[['date', 'Label']].tail(10))
 
         return df
     except Exception as e:
@@ -205,115 +155,159 @@ def label_data(df, signal_dates):
         traceback.print_exc()  # 상세한 traceback 정보 출력
         return pd.DataFrame()
 
-def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
+# 모델 아키텍처를 더 단순화하기
+def create_lstm_model(input_shape):
+    model = Sequential()
+    model.add(InputLayer(shape=input_shape))
+    # 더 작은 네트워크, 더 강한 정규화
+    model.add(LSTM(2, kernel_regularizer=l2(0.05)))  # 유닛 수를 2개로 더 감소
+    model.add(BatchNormalization())  # 배치 정규화 추가
+    model.add(Dropout(0.9))  # 드롭아웃 비율 증가
+    model.add(Dense(1))
+    
+    # 학습률 조정
+    optimizer = Adam(learning_rate=0.000005)  # 학습률 더 감소
+    model.compile(optimizer=optimizer, loss='mae', metrics=['mse'])
+    return model
+
+def train_lstm_model(X, y):
     try:
-        print('Training model')
+        print('Training LSTM model')
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         y = y[X.index]
         
-        print("Class distribution in y:")
-        print(y.value_counts())
+        # 데이터 형태 변환 (LSTM 입력 형태에 맞게)
+        X = np.expand_dims(X.values, axis=2)
         
-        # Calculate class weights
-        class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
-        for class_label, weight in y.value_counts(normalize=True).items():
-            class_weights[class_label] = weight
+        # LSTM 모델 생성
+        model = create_lstm_model((X.shape[1], X.shape[2]))
         
-        sample_weights = np.array([1/class_weights[yi] for yi in y])
+        # 조기 종료 콜백 설정
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            min_delta=0.001,
+            restore_best_weights=True,
+            verbose=1
+        )
         
-        print(f"use_saved_params: {use_saved_params}")  # use_saved_params 값 출력
-        print(f"param_file exists: {os.path.exists(param_file)}")  # param_file 존재 여부 출력
-        
-        if use_saved_params and os.path.exists(param_file):
-            print("Loading saved parameters...")
-            try:
-                best_params = joblib.load(param_file)
-                model = xgb.XGBClassifier(
-                    **best_params,
-                    random_state=42,
-                    objective='multi:softmax',
-                    num_class=4,
-                    eval_metric='mlogloss'
-                )
-                print("Model loaded with saved parameters.")
-            except Exception as e:
-                print(f"Error loading saved parameters: {e}")
-                model = None  # 로딩 실패 시 model을 None으로 설정
-        else:
-            print("Tuning hyperparameters...")
-            param_grid = {
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 6, 9],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'subsample': [0.8, 1.0],
-                'colsample_bytree': [0.8, 1.0],
-                'min_child_weight': [1, 3, 5]
-            }
-            
-            base_model = xgb.XGBClassifier(
-                random_state=42,
-                objective='multi:softmax',
-                num_class=4,
-                eval_metric='mlogloss'
-            )
-            
-            grid_search = GridSearchCV(
-                estimator=base_model,
-                param_grid=param_grid,
-                cv=3,
-                scoring='f1_weighted',
-                n_jobs=-1,
-                verbose=2
-            )
-            
-            # Train with sample weights
-            grid_search.fit(X, y, sample_weight=sample_weights)
-            
-            best_params = grid_search.best_params_
-            print(f'Best parameters found: {best_params}')
-            joblib.dump(best_params, param_file)
-            model = grid_search.best_estimator_
-            print("Model trained with new parameters.")
-        
-        if model is not None:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            
-            # Calculate weights for training set
-            train_class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
-            for class_label, weight in y_train.value_counts(normalize=True).items():
-                train_class_weights[class_label] = weight
-            
-            train_weights = np.array([1/train_class_weights[yi] for yi in y_train])
-            
-            # Train final model with weights
-            model.fit(X_train, y_train, sample_weight=train_weights)
-            
-            y_pred = model.predict(X_test)
-            print(f'Accuracy: {accuracy_score(y_test, y_pred)}')
-            print('Classification Report:')
-            print(classification_report(y_test, y_pred))
-        else:
-            print("Model training failed.")
+        # 훈련 데이터에서 클래스 가중치 계산
+        class_weights = {0: len(y) / (2 * (len(y) - sum(y))), 
+                        1: len(y) / (2 * sum(y))}
+
+        # 모델 훈련 시 클래스 가중치 적용
+        history = model.fit(X, y, epochs=100, batch_size=32, 
+                           validation_split=0.2, 
+                           class_weight=class_weights,
+                           callbacks=[early_stopping])
         
         return model
     except Exception as e:
-        print(f'Error training model: {e}')
+        print(f'Error training LSTM model: {e}')
         import traceback
         traceback.print_exc()  # 상세한 traceback 정보 출력
         return None
 
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from tqdm import tqdm
+
+def evaluate_lstm_model_with_tss(model, X, y, n_splits=5):
+    tss = TimeSeriesSplit(n_splits=n_splits)
+    mse_scores = []
+    mae_scores = []
+    
+    for train_index, test_index in tqdm(tss.split(X), total=n_splits, desc="Evaluating with TimeSeriesSplit"):
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        
+        # 데이터 형태 변환 (LSTM 입력 형태에 맞게)
+        X_train_reshaped = np.expand_dims(X_train.values, axis=2)
+        X_test_reshaped = np.expand_dims(X_test.values, axis=2)
+        
+        # 모델 훈련
+        model = create_lstm_model((X_train_reshaped.shape[1], X_train_reshaped.shape[2]))
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            min_delta=0.001,
+            restore_best_weights=True,
+            verbose=1
+        )
+        history = model.fit(X_train_reshaped, y_train, epochs=100, batch_size=32, 
+                            validation_split=0.2, callbacks=[early_stopping])
+        
+        # 예측
+        y_pred = model.predict(X_test_reshaped)
+        
+        # 성능 평가
+        mse = mean_squared_error(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred)
+        mse_scores.append(mse)
+        mae_scores.append(mae)
+        
+        print(f"TimeSeriesSplit Fold - MSE: {mse:.4f}, MAE: {mae:.4f}")
+    
+    print(f"TimeSeriesSplit - Average MSE: {np.mean(mse_scores):.4f}, Average MAE: {np.mean(mae_scores):.4f}")
+    return np.mean(mse_scores), np.mean(mae_scores)
+
+# 모델 평가 부분을 다음과 같이 변경
+def evaluate_lstm_model(model, X, y):
+    try:
+        # TimeSeriesSplit을 사용하여 모델 평가
+        print("Evaluating with TimeSeriesSplit...")
+        tss_mse, tss_mae = evaluate_lstm_model_with_tss(model, X, y)
+        
+        # TimeSeriesSplit 결과 출력
+        print(f"TimeSeriesSplit - MSE: {tss_mse:.4f}, MAE: {tss_mae:.4f}")
+        
+        # MAE가 작을수록 좋은 모델
+        return -tss_mae
+    except Exception as e:
+        print(f"Error evaluating LSTM model: {e}")
+        return -float('inf')  # 최소값 반환
+
+# 2. tf.function 데코레이터 추가
+import tensorflow as tf
+
+@tf.function(reduce_retracing=True)
+def predict_batch(model, x):
+    return model(x, training=False)
+
+# predict_pattern 함수 수정
 def predict_pattern(model, df, stock_code, use_data_dates=True):
     try:
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
             return pd.DataFrame(columns=['date', 'stock_code'])
+            
         X = df[COLUMNS_TRAINING_DATA]
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        predictions = model.predict(X)
+        
+        # 일관된 배치 크기 유지
+        X_reshaped = np.expand_dims(X.values, axis=2)  # LSTM 입력 형태에 맞게 변환
+        
+        # 한 번에 예측 (루프 안에서 여러 번 호출하지 않음)
+        batch_size = 32
+        predictions = []
+
+        for i in range(0, len(X_reshaped), batch_size):
+            batch = X_reshaped[i:i+batch_size]
+            # 배치 크기 일정하게 유지
+            if len(batch) < batch_size:
+                batch_preds = model.predict(batch, verbose=0)
+            else:
+                batch_preds = predict_batch(model, batch)
+            predictions.append(batch_preds)
+
+        predictions = np.concatenate(predictions)
+        
         df = df.loc[X.index]  # 동일한 인덱스를 유지
         df['Prediction'] = predictions
+        
+        # 나머지 코드는 동일
         print(f'Patterns predicted: {len(predictions)} total predictions')
         print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
         
@@ -376,7 +370,6 @@ def predict_pattern(model, df, stock_code, use_data_dates=True):
         return pd.DataFrame(columns=['date', 'stock_code'])
 
 def evaluate_performance(df, start_date, end_date):
-    #print(df)
     try:
         print('Evaluating performance')
         df['date'] = pd.to_datetime(df['date'])
@@ -430,7 +423,7 @@ if __name__ == '__main__':
         'Close_to_MA120', 'Volume_to_MA120',
         'Close_to_MA240', 'Volume_to_MA240',
         ]
-    print("Starting pattern recognition")
+    print("Starting lstm training...")
     
     # Load filtered stock results
     filtered_results = load_filtered_stock_results(host, user, password, database_buy_list, results_table)
@@ -441,8 +434,7 @@ if __name__ == '__main__':
         total_models = 0
         successful_models = 0
         current_date = datetime.now().strftime('%Y%m%d')
-        model_filename = os.path.join(model_dir, f"{results_table}_{current_date}.json")
-        param_file = 'best_params.pkl'
+        model_filename = os.path.join(model_dir, f"{results_table}_{current_date}.h5")
         
         print(f"Model filename: {model_filename}")  # 모델 파일 경로 출력
         
@@ -453,7 +445,7 @@ if __name__ == '__main__':
         # 아래 and를 &&로 바꾸지 말 것
         if choice == 'no':
             # 모델 디렉토리에서 사용 가능한 모델 파일 목록 가져오기
-            available_models = [f for f in os.listdir(model_dir) if f.endswith('.json')]
+            available_models = [f for f in os.listdir(model_dir) if f.endswith('.h5')]
             
             if not available_models:
                 print("No saved models found. Will train a new model.")
@@ -476,8 +468,8 @@ if __name__ == '__main__':
                             if 0 <= model_index < len(available_models):
                                 model_filename = os.path.join(model_dir, available_models[model_index])
                                 print(f"Loading model: {model_filename}")
-                                model = xgb.XGBClassifier()
-                                model.load_model(model_filename)
+                                from tensorflow.keras.models import load_model
+                                model = load_model(model_filename)  # create_lstm_model + load_weights 대신
                                 best_model = model  # 로드한 모델을 best_model에도 저장
                                 best_accuracy = 0.0  # 저장된 모델을 로드할 때 best_accuracy 초기화
                                 retrain = False
@@ -491,8 +483,6 @@ if __name__ == '__main__':
         
         if retrain:
             print("Retraining the model...")
-            # 하이퍼파라미터 튜닝 결과를 재사용할 것인지 물어봄
-            use_saved_params = True  # use_saved_params를 True로 초기화
             
             # filtered_results 데이터프레임을 종목별로 그룹화
             grouped_results = filtered_results.groupby('code_name')
@@ -505,6 +495,7 @@ if __name__ == '__main__':
             # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
             for code_name, group in tqdm(grouped_results, desc="Training models"):
                 signal_dates = group['signal_date'].tolist()
+                estimated_profit_rates = group['estimated_profit_rate'].tolist()
                 
                 # 문자열 형태의 signal_dates를 datetime 객체로 변환
                 valid_signal_dates = []
@@ -549,7 +540,7 @@ if __name__ == '__main__':
                         
                     # 특성 추출 및 라벨링
                     df = extract_features(df)
-                    df = label_data(df, signal_group)  # 해당 그룹의 날짜만 전달
+                    df = label_data(df, signal_group, estimated_profit_rates)  # 해당 그룹의 날짜만 전달
                     
                     if df.empty:
                         continue
@@ -557,7 +548,7 @@ if __name__ == '__main__':
                     # 모델 훈련
                     X = df[COLUMNS_TRAINING_DATA]
                     y = df['Label']
-                    model = train_model(X, y, use_saved_params and not first_stock, param_file)
+                    model = train_lstm_model(X, y)
                     
                     # 모델 평가 및 저장
                     if model:
@@ -566,10 +557,8 @@ if __name__ == '__main__':
                         print(f"Model trained for {code_name} from {start_date} to {end_date}")
                         
                         # 가장 좋은 모델을 선택하기 위해 성능 평가
-                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                        y_pred = model.predict(X_test)
-                        accuracy = accuracy_score(y_test, y_pred)
-                        
+                        accuracy = evaluate_lstm_model(model, X, y)
+
                         if accuracy > best_accuracy or best_model is None:
                             best_model = model
                             best_accuracy = accuracy
@@ -594,7 +583,7 @@ if __name__ == '__main__':
         # 모델 저장 (이제 best_model을 사용)
         if best_model:
             print("Saving best model...")  # 모델 저장 시 디버깅 메시지 추가
-            best_model.save_model(model_filename)
+            best_model.save(model_filename)  # .save_weights() 대신 전체 모델 저장
             print(f"Best model saved as {model_filename} with accuracy: {best_accuracy:.4f}")
             message = f"Best model saved as {model_filename} with accuracy: {best_accuracy:.4f}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
@@ -711,3 +700,31 @@ if __name__ == '__main__':
 
     else:
         print("Error in main execution: No filtered stock results loaded")
+
+def hybrid_split(X, y, test_size=0.2):
+    # 레이블이 0이 아닌 데이터 식별
+    signal_indices = y[y != 0].index
+    non_signal_indices = y[y == 0].index
+    
+    # 각각 80/20으로 분할
+    train_signal = signal_indices[:int(len(signal_indices)*(1-test_size))]
+    test_signal = signal_indices[int(len(signal_indices)*(1-test_size)):]
+
+    train_non_signal = non_signal_indices[:int(len(non_signal_indices)*(1-test_size))]
+    test_non_signal = non_signal_indices[int(len(non_signal_indices)*(1-test_size)):]
+
+    # 훈련/테스트 세트 생성
+    train_indices = list(train_signal) + list(train_non_signal)
+    test_indices = list(test_signal) + list(test_non_signal)
+
+    # 인덱스 정렬 (시간 순서 유지)
+    train_indices.sort()
+    test_indices.sort()
+
+    # 데이터 분할
+    X_train = X.loc[train_indices]
+    X_test = X.loc[test_indices]
+    y_train = y.loc[train_indices]
+    y_test = y.loc[test_indices]
+
+    return X_train, X_test, y_train, y_test

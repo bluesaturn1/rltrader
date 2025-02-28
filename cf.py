@@ -13,13 +13,13 @@ MYSQL_PASSWORD = 'bluesaturn1+'
 MYSQL_PORT = 3306
 MYSQL_DATABASE_BUY_LIST = 'daily_buy_list'
 MYSQL_DATABASE_CRAW = 'daily_craw'
-FINDING_RESULTS_TABLE = 'dense_results_2003'  # finding & training table
-RECOGNITION_PERFORMANCE_TABLE = 'dense_group_results'
+FINDING_RESULTS_TABLE = 'dense_updown_results'  # finding & training table
+RECOGNITION_PERFORMANCE_TABLE = 'dense_updown_performance'  # recognition performance table
 
 
 # 검색 설정
-SEARCH_START_DATE = '20030101'
-SEARCH_END_DATE = '20121231'
+SEARCH_START_DATE = '20200101' #2015년 6월부터 상한가 30%로 변경 
+SEARCH_END_DATE = '20221231'
 PERIOD = 60
 PRICE_CHANGE_THRESHOLD = 1.0
 PRICE_CHANGE_THRESHOLD_2 = 0.75
@@ -33,5 +33,5 @@ MODEL_VALIDATION_END_DATE = '20230115'
 PREDICTION_VALIDATION_DAYS = 30  # 최신 데이터 이후 30일간의 예측 검증
 
 # 검증 설정
-VALIDATION_START_DATE = '20250217'
-VALIDATION_END_DATE = '20250226'    # 검증 기간 종료 날짜 설정
+VALIDATION_START_DATE = '20230116'
+VALIDATION_END_DATE = '20230131'    # 검증 기간 종료 날짜 설정
