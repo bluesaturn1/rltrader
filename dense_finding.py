@@ -229,7 +229,7 @@ if __name__ == '__main__':
                 # 중간 저장 로직 추가
                 if (index + 1) % save_interval == 0:
                     print(f"\nSaving intermediate performance results to MySQL database at index {index + 1}...")
-                    save_results_to_mysql(performance_results, host, user, password, database_buy_list, result_table)
+                    save_results_to_mysql(performance_results, host, user, password, database_buy_list, results_table)
                     print("\nIntermediate performance results saved successfully.")
             
             # 검색된 종목의 개수와 종목 이름 출력
@@ -240,7 +240,7 @@ if __name__ == '__main__':
             
             if performance_results:
                 print("\nSaving final performance results to MySQL database...")
-                save_results_to_mysql(performance_results, host, user, password, database_buy_list, result_table)
+                save_results_to_mysql(performance_results, host, user, password, database_buy_list, results_table)
                 print("\nFinal performance results saved successfully.")
                 
                 # 텔레그램 메시지 보내기
