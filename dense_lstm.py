@@ -430,6 +430,10 @@ if __name__ == '__main__':
     # Load filtered stock results
     filtered_results = load_filtered_stock_results(buy_list_db, results_table)
     
+    # filtered_results에서 일부만 사용
+    sample_size = 100  # 원하는 샘플 수
+    filtered_results = filtered_results.sample(n=min(sample_size, len(filtered_results)))
+
     if not filtered_results.empty:
         print("Filtered stock results loaded successfully")
         
