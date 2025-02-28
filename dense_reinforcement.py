@@ -1,11 +1,6 @@
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.metrics import f1_score, make_scorer
 import os
-import joblib
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
@@ -15,23 +10,56 @@ from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
 from imblearn.over_sampling import SMOTE
-from db_connection import DBConnectionManager
+from sklearn.metrics import accuracy_score  # 추가
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+import gym
+from gym import spaces
+from sqlalchemy.pool import QueuePool
+import time
 
+# 데이터베이스 연결을 관리하는 클래스
+class DBConnectionManager:
+    def __init__(self, host, user, password, database):
+        self.engine = create_engine(
+            f'mysql+pymysql://{user}:{password}@{host}/{database}',
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=3600
+        )
+    
+    def get_connection(self):
+        return self.engine.connect()
+    
+    def execute_query(self, query, retries=3, delay=5):
+        for attempt in range(retries):
+            try:
+                with self.engine.connect() as conn:
+                    return pd.read_sql(query, conn)
+            except SQLAlchemyError as e:
+                if "Too many connections" in str(e) and attempt < retries - 1:
+                    print(f"Connection error, retrying in {delay} seconds... (Attempt {attempt+1}/{retries})")
+                    time.sleep(delay)
+                else:
+                    raise
+
+# 기존 함수 대체
 
 def load_filtered_stock_results(db_manager, table):
     try:
         query = f"SELECT * FROM {table}"
-        df = db_manager.execute_query(query)
-        return df
-    except Exception as e:
-        print(f"Error loading data from MySQL: {e}")
+        return db_manager.execute_query(query)
+    except SQLAlchemyError as e:
+        print(f"MySQL에서 데이터 로드 오류: {e}")
         return pd.DataFrame()
 
 def load_daily_craw_data(db_manager, table, start_date, end_date):
     try:
         start_date_str = start_date.strftime('%Y%m%d')
         end_date_str = end_date.strftime('%Y%m%d')
-        print(f"Loading data from {start_date_str} to {end_date_str} for table {table}")
+        print(f"{table}의 {start_date_str}부터 {end_date_str}까지 데이터 로드 중")
         
         query = f"""
             SELECT * FROM `{table}`
@@ -40,10 +68,10 @@ def load_daily_craw_data(db_manager, table, start_date, end_date):
         """
         
         df = db_manager.execute_query(query)
-        print(f"Data loaded from {start_date_str} to {end_date_str} for table {table}: {len(df)} rows")
+        print(f"{table}의 {start_date_str}부터 {end_date_str}까지 데이터 로드 완료: {len(df)} 행")
         return df
-    except Exception as e:
-        print(f"Error loading data from MySQL: {e}")
+    except SQLAlchemyError as e:
+        print(f"MySQL에서 데이터 로드 오류: {e}")
         return pd.DataFrame()
 
 def extract_features(df):
@@ -98,86 +126,34 @@ def extract_features(df):
         
         df = df.dropna()
         print(f'Features extracted: {len(df)}')
-        # print(df.head())
-        # print(df.tail())
+        
+        # 정규화 추가
+        from sklearn.preprocessing import MinMaxScaler
+        scaler = MinMaxScaler()
+        numeric_columns = df[COLUMNS_TRAINING_DATA].columns
+        df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
+        
         return df
     except Exception as e:
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
-def label_data(df, signal_dates):
+def label_data(df, valid_signal_dates, estimated_profit_rates):
     try:
         print('Labeling data')
         
-        df['Label'] = 0  # 기본값을 0으로 설정
+        # 기본값을 0으로 설정
+        df['Label'] = 0
         df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
         
-        # signal_dates를 올바른 형식으로 변환하고, 잘못된 형식의 날짜를 처리
-        valid_signal_dates = []
-        for date in signal_dates:
-            try:
-                valid_date = pd.to_datetime(date).date()
-                valid_signal_dates.append(valid_date)
-            except ValueError:
-                print(f"Invalid date format: {date}")
+        # 디버깅 정보 추가
+        print(f"Number of signal dates: {len(valid_signal_dates)}")
+        print(f"Number of estimated profit rates: {len(estimated_profit_rates)}")
         
-        # 날짜 정렬
-        valid_signal_dates.sort()
-        print(f'Signal dates: {valid_signal_dates}')
+        # 각 신호 날짜에 대해 estimated_profit_rate를 라벨로 설정
+        signal_date_to_profit_rate = dict(zip(valid_signal_dates, estimated_profit_rates))
         
-        if len(valid_signal_dates) > 0:
-            # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
-            date_groups = []
-            current_group = [valid_signal_dates[0]]
-            
-            for i in range(1, len(valid_signal_dates)):
-                days_diff = (valid_signal_dates[i] - valid_signal_dates[i-1]).days
-                if days_diff >= 90:  # 3개월 이상 차이
-                    date_groups.append(current_group)
-                    current_group = [valid_signal_dates[i]]
-                else:
-                    current_group.append(valid_signal_dates[i])
-            
-            date_groups.append(current_group)
-            
-            print(f"Found {len(date_groups)} separate signal groups")
-            
-            # 각 그룹 처리
-            for group_idx, group in enumerate(date_groups):
-                print(f"Processing group {group_idx+1} with {len(group)} signals")
-                
-                # 그룹의 시작과 끝 날짜
-                start_date = min(group)
-                end_date = max(group)
-                
-                # 원래 신호 날짜들을 3등분하여 라벨 부여
-                n = len(group)
-                first_third = group[:n//3] if n > 2 else group
-                second_third = group[n//3:2*n//3] if n > 2 else []
-                last_third = group[2*n//3:] if n > 2 else []
-                
-                # 원본 신호 날짜에 라벨(1,2,3) 부여
-                signal_labels = {}
-                for date in first_third:
-                    signal_labels[date] = 1
-                for date in second_third:
-                    signal_labels[date] = 2
-                for date in last_third:
-                    signal_labels[date] = 3
-                
-                # 각 신호 날짜를 데이터프레임에 적용
-                sorted_dates = df[(df['date'] >= start_date) & (df['date'] <= end_date)]['date'].unique()
-                sorted_dates.sort()
-                
-                # 각 날짜에 대해 처리
-                current_label = 0
-                for date in sorted_dates:
-                    if date in signal_labels:
-                        # 신호 날짜인 경우 해당 라벨로 설정
-                        current_label = signal_labels[date]
-                    
-                    # 현재 라벨(이전 신호와 같은 라벨)을 적용
-                    df.loc[df['date'] == date, 'Label'] = current_label
+        df['Label'] = df['date'].map(signal_date_to_profit_rate).fillna(0)
         
         print(f'Data labeled: {len(df)} rows')
 
@@ -187,9 +163,9 @@ def label_data(df, signal_dates):
         
         # 첫 5개와 마지막 10개의 라벨 출력
         print("First 5 labels:")
-        print(df[['date', 'Label']].head(3))
+        print(df[['date', 'Label']].head(5))
         print("Last 10 labels:")
-        print(df[['date', 'Label']].tail(15))
+        print(df[['date', 'Label']].tail(10))
 
         return df
     except Exception as e:
@@ -198,208 +174,168 @@ def label_data(df, signal_dates):
         traceback.print_exc()  # 상세한 traceback 정보 출력
         return pd.DataFrame()
 
-def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
+class StockTradingEnv(gym.Env):
+    def __init__(self, df, signal_dates, estimated_profit_rates):
+        super(StockTradingEnv, self).__init__()
+        
+        self.df = df
+        
+        # 날짜를 datetime.date 객체로 변환
+        self.df['date'] = pd.to_datetime(self.df['date']).dt.date if 'date' in self.df.columns else None
+        
+        # 날짜별 수익률 매핑 생성
+        self.profit_rate_map = {}
+        if signal_dates and estimated_profit_rates:
+            for date, rate in zip(signal_dates, estimated_profit_rates):
+                self.profit_rate_map[date] = float(rate)
+        
+        self.current_step = 0
+        
+        # Define action and observation space
+        # Actions: Buy (1), Hold (0), Sell (-1)
+        self.action_space = spaces.Discrete(3)
+        
+        # Observation space: [Open, High, Low, Close, Volume, ...]
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, 
+            shape=(len(df.columns),), 
+            dtype=np.float32
+        )
+        
+    def reset(self):
+        self.current_step = 0
+        return self._next_observation()
+    
+    def _next_observation(self):
+        obs = self.df.iloc[self.current_step].values
+        return obs
+    
+    def step(self, action):
+        reward = self._calculate_reward(action)
+        
+        self.current_step += 1
+        
+        if self.current_step >= len(self.df):
+            done = True
+        else:
+            done = False
+        
+        obs = self._next_observation() if not done else np.zeros(self.observation_space.shape)
+        
+        return obs, reward, done, {}
+    
+    def _calculate_reward(self, action):
+        # 현재 날짜 가져오기
+        if 'date' in self.df.columns and self.current_step < len(self.df):
+            current_date = self.df.iloc[self.current_step]['date']
+            
+            # 신호 날짜에 해당하면 해당 수익률 반환, 아니면 0
+            profit_rate = self.profit_rate_map.get(current_date, 0)
+        else:
+            profit_rate = 0
+            
+        if action == 1:  # Buy
+            reward = profit_rate
+        elif action == -1:  # Sell
+            reward = -profit_rate
+        else:  # Hold
+            reward = 0
+        return reward
+
+    def render(self, mode='human', close=False):
+        pass
+
+def train_ppo_model(df, signal_dates, estimated_profit_rates):
     try:
-        print('Training model')
-        X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        y = y[X.index]
+        print("Creating environment...")
+        env = StockTradingEnv(df, signal_dates, estimated_profit_rates)
+        env = make_vec_env(lambda: env, n_envs=1)
         
-        print("Class distribution in y:")
-        print(y.value_counts())
-        
-        # Calculate class weights
-        class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
-        for class_label, weight in y.value_counts(normalize=True).items():
-            class_weights[class_label] = weight
-        
-        sample_weights = np.array([1/class_weights[yi] for yi in y])
-        
-        print(f"use_saved_params: {use_saved_params}")  # use_saved_params 값 출력
-        print(f"param_file exists: {os.path.exists(param_file)}")  # param_file 존재 여부 출력
-        
-        if use_saved_params and os.path.exists(param_file):
-            print("Loading saved parameters...")
-            try:
-                best_params = joblib.load(param_file)
-                model = xgb.XGBClassifier(
-                    **best_params,
-                    random_state=42,
-                    objective='multi:softmax',
-                    num_class=4,
-                    eval_metric='mlogloss'
-                )
-                print("Model loaded with saved parameters.")
-            except Exception as e:
-                print(f"Error loading saved parameters: {e}")
-                model = None  # 로딩 실패 시 model을 None으로 설정
-        else:
-            print("Tuning hyperparameters...")
-            param_grid = {
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 6, 9],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'subsample': [0.8, 1.0],
-                'colsample_bytree': [0.8, 1.0],
-                'min_child_weight': [1, 3, 5]
-            }
-            
-            base_model = xgb.XGBClassifier(
-                random_state=42,
-                objective='multi:softmax',
-                num_class=4,
-                eval_metric='mlogloss'
-            )
-            
-            grid_search = GridSearchCV(
-                estimator=base_model,
-                param_grid=param_grid,
-                cv=3,
-                scoring='f1_weighted',
-                n_jobs=-1,
-                verbose=2
-            )
-            
-            # Train with sample weights
-            grid_search.fit(X, y, sample_weight=sample_weights)
-            
-            best_params = grid_search.best_params_
-            print(f'Best parameters found: {best_params}')
-            joblib.dump(best_params, param_file)
-            model = grid_search.best_estimator_
-            print("Model trained with new parameters.")
-        
-        if model is not None:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            
-            # Calculate weights for training set
-            train_class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
-            for class_label, weight in y_train.value_counts(normalize=True).items():
-                train_class_weights[class_label] = weight
-            
-            train_weights = np.array([1/train_class_weights[yi] for yi in y_train])
-            
-            # Train final model with weights
-            model.fit(X_train, y_train, sample_weight=train_weights)
-            
-            y_pred = model.predict(X_test)
-            print(f'Accuracy: {accuracy_score(y_test, y_pred)}')
-            print('Classification Report:')
-            print(classification_report(y_test, y_pred))
-        else:
-            print("Model training failed.")
-        
+        print("Training PPO model...")
+        model = PPO('MlpPolicy', env, verbose=1, 
+                   learning_rate=0.0003,
+                   n_steps=2048)
+        model.learn(total_timesteps=10000)
         return model
     except Exception as e:
-        print(f'Error training model: {e}')
+        print(f"Error in train_ppo_model: {e}")
         import traceback
-        traceback.print_exc()  # 상세한 traceback 정보 출력
+        traceback.print_exc()
         return None
 
-def predict_pattern(model, df, stock_code, use_data_dates=True):
+# 2. evaluate_lstm_model 함수를 평가 방식에 맞게 변경
+def evaluate_ppo_model(model, df, signal_dates, estimated_profit_rates):
     try:
-        print('Predicting patterns')
+        # 환경 생성
+        env = StockTradingEnv(df, signal_dates, estimated_profit_rates)
+        env = make_vec_env(lambda: env, n_envs=1)
+        
+        # 모델로 에피소드 실행
+        obs = env.reset()
+        done = False
+        total_reward = 0
+        while not done:
+            action, _ = model.predict(obs)
+            obs, reward, done, _ = env.step(action)
+            total_reward += reward
+            
+        print(f"Model evaluation - Total reward: {total_reward:.4f}")
+        return total_reward
+    except Exception as e:
+        print(f"Error evaluating PPO model: {e}")
+        import traceback
+        traceback.print_exc()
+        return -float('inf')  # 최소값 반환
+
+# 3. predict_pattern 함수를 PPO에 맞게 수정
+def predict_pattern_with_ppo(model, df, stock_code, use_data_dates=True):
+    try:
+        print('Predicting patterns with PPO model')
         if model is None:
             print("Model is None, cannot predict patterns.")
             return pd.DataFrame(columns=['date', 'stock_code'])
-        X = df[COLUMNS_TRAINING_DATA]
-        # 무한대 값이나 너무 큰 값 제거
-        X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        predictions = model.predict(X)
-        df = df.loc[X.index]  # 동일한 인덱스를 유지
-        df['Prediction'] = predictions
-        print(f'Patterns predicted: {len(predictions)} total predictions')
-        print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
+            
+        # 예측 환경 생성 (신호 날짜와 수익률은 예측 시 없으므로 빈 리스트로 설정)
+        env = StockTradingEnv(df, [], [])
+        env = make_vec_env(lambda: env, n_envs=1)
         
-        # 날짜 형식을 안전하게 변환
-        try:
-            # MySQL의 YYYYMMDD 형식 문자열을 datetime으로 변환
-            if df['date'].dtype == 'object':
-                # YYYYMMDD 형식의 문자열을 datetime으로 변환
-                df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
-            elif not pd.api.types.is_datetime64_any_dtype(df['date']):
-                df['date'] = pd.to_datetime(df['date'], errors='coerce')
-            
-            # NaT 값 제거
-            df = df.dropna(subset=['date'])
-            print(f"Date range in data: {df['date'].min()} to {df['date'].max()}")
-            
-            # 검증 기간 설정 부분 수정
-            if use_data_dates:
-                # 데이터의 최신 날짜 이후로 예측 검증 기간 설정 (훈련 직후 검증용)
-                max_date = df['date'].max()
-                validation_start_date = max_date + pd.Timedelta(days=1)
-                validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
-            else:
-                # cf.py에 설정된 검증 기간 사용 (외부 검증용)
-                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
-            
-            print(f"Validation period: {validation_start_date} to {validation_end_date}")
-            
-            # 검증 기간 동안의 패턴 필터링 (Prediction이 0보다 큰 경우만)
-            recent_patterns = df[
-                (df['Prediction'] > 0) & 
-                (df['date'] >= validation_start_date) & 
-                (df['date'] <= validation_end_date)
-            ].copy()
-            
-            print(f'Filtered patterns in validation period: {len(recent_patterns)}')
-            
-            if not recent_patterns.empty:
-                recent_patterns['stock_code'] = stock_code
-                result = recent_patterns[['date', 'stock_code']]
-                print(f'Found patterns for {stock_code}:')
-                print(result)
-                return result
-            else:
-                print(f'No patterns found for {stock_code} in validation period')
-                return pd.DataFrame(columns=['date', 'stock_code'])
-                
-        except Exception as e:
-            print(f"Error in date processing: {e}")
-            print(f"Debug info - df['date'] sample: {df['date'].head()}")
-            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE}")
-            return pd.DataFrame(columns=['date', 'stock_code'])
-            
+        # 모델로 예측 실행
+        obs = env.reset()
+        actions = []
+        
+        # 각 스텝별로 행동(action) 예측
+        for _ in range(len(df)):
+            action, _ = model.predict(obs, deterministic=True)
+            actions.append(action)
+            obs, _, done, _ = env.step(action)
+            if done:
+                break
+        
+        # 매수 신호(action=1)가 있는 날짜 추출
+        buy_signals = [i for i, a in enumerate(actions) if a == 1]
+        result_dates = []
+        
+        if use_data_dates:
+            for idx in buy_signals:
+                if idx < len(df):
+                    result_dates.append(df.iloc[idx]['date'])
+        else:
+            # 최신 날짜만 선택
+            if buy_signals and buy_signals[-1] < len(df):
+                result_dates.append(df.iloc[buy_signals[-1]]['date'])
+        
+        result_df = pd.DataFrame({
+            'date': result_dates,
+            'stock_code': [stock_code] * len(result_dates)
+        })
+        
+        return result_df
+    
     except Exception as e:
-        print(f'Error predicting patterns: {e}')
-        print(f'Error type: {type(e).__name__}')
+        print(f"Error predicting patterns: {e}")
         import traceback
-        print(f'Stack trace:\n{traceback.format_exc()}')
+        traceback.print_exc()
         return pd.DataFrame(columns=['date', 'stock_code'])
-
-def evaluate_performance(df, start_date, end_date):
-    #print(df)
-    try:
-        print('Evaluating performance')
-        df['date'] = pd.to_datetime(df['date'])
-        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-        if (df.empty):
-            print(f"No data found between {start_date} and {end_date}")
-            return None
-        max_close = df['close'].max()
-        initial_close = df['close'].iloc[0]
-        max_return = (max_close / initial_close - 1) * 100
-        return max_return
-    except Exception as e:
-        print(f'Error evaluating performance: {e}')
-        return None
-
-def save_performance_to_db(df, db_manager, table):
-    try:
-        result = db_manager.to_sql(df, table)
-        if result:
-            print(f"Performance results saved to {table} table in {db_manager.database} database")
-        return result
-    except Exception as e:
-        print(f"Error saving performance results to MySQL: {e}")
-        return False
-
-import os
-
-# 모델 파일 경로 설정
-model_dir = 'models'
-os.makedirs(model_dir, exist_ok=True)
 
 if __name__ == '__main__':
     host = cf.MYSQL_HOST
@@ -425,14 +361,18 @@ if __name__ == '__main__':
         'Close_to_MA120', 'Volume_to_MA120',
         'Close_to_MA240', 'Volume_to_MA240',
         ]
-    print("Starting pattern recognition")
+    print("Starting PPO training...")
     
-    # 데이터베이스 연결 관리자 생성
-    buy_list_db = DBConnectionManager(host, user, password, database_buy_list)
-    craw_db = DBConnectionManager(host, user, password, database_craw)
+    # 모델 디렉토리 설정
+    model_dir = './models/'
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
     
-    # 앞으로는 아래와 같이 db_manager를 사용
-    filtered_results = load_filtered_stock_results(buy_list_db, results_table)
+    # DBConnectionManager 인스턴스 생성
+    connection_manager = DBConnectionManager(host, user, password, database_buy_list)
+    
+    # Load filtered stock results
+    filtered_results = load_filtered_stock_results(connection_manager, results_table)
     
     if not filtered_results.empty:
         print("Filtered stock results loaded successfully")
@@ -440,8 +380,7 @@ if __name__ == '__main__':
         total_models = 0
         successful_models = 0
         current_date = datetime.now().strftime('%Y%m%d')
-        model_filename = os.path.join(model_dir, f"{results_table}_{current_date}.json")
-        param_file = 'best_params.pkl'
+        model_filename = os.path.join(model_dir, f"{results_table}_{current_date}.zip")
         
         print(f"Model filename: {model_filename}")  # 모델 파일 경로 출력
         
@@ -452,7 +391,7 @@ if __name__ == '__main__':
         # 아래 and를 &&로 바꾸지 말 것
         if choice == 'no':
             # 모델 디렉토리에서 사용 가능한 모델 파일 목록 가져오기
-            available_models = [f for f in os.listdir(model_dir) if f.endswith('.json')]
+            available_models = [f for f in os.listdir(model_dir) if f.endswith('.zip')]
             
             if not available_models:
                 print("No saved models found. Will train a new model.")
@@ -475,8 +414,7 @@ if __name__ == '__main__':
                             if 0 <= model_index < len(available_models):
                                 model_filename = os.path.join(model_dir, available_models[model_index])
                                 print(f"Loading model: {model_filename}")
-                                model = xgb.XGBClassifier()
-                                model.load_model(model_filename)
+                                model = PPO.load(model_filename)
                                 best_model = model  # 로드한 모델을 best_model에도 저장
                                 best_accuracy = 0.0  # 저장된 모델을 로드할 때 best_accuracy 초기화
                                 retrain = False
@@ -490,8 +428,6 @@ if __name__ == '__main__':
         
         if retrain:
             print("Retraining the model...")
-            # 하이퍼파라미터 튜닝 결과를 재사용할 것인지 물어봄
-            use_saved_params = True  # use_saved_params를 True로 초기화
             
             # filtered_results 데이터프레임을 종목별로 그룹화
             grouped_results = filtered_results.groupby('code_name')
@@ -504,6 +440,7 @@ if __name__ == '__main__':
             # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
             for code_name, group in tqdm(grouped_results, desc="Training models"):
                 signal_dates = group['signal_date'].tolist()
+                estimated_profit_rates = group['estimated_profit_rate'].tolist()
                 
                 # 문자열 형태의 signal_dates를 datetime 객체로 변환
                 valid_signal_dates = []
@@ -541,34 +478,25 @@ if __name__ == '__main__':
                     start_date = end_date - timedelta(days=1200)
                     
                     print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
-                    df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
+                    df = load_daily_craw_data(connection_manager, code_name, start_date, end_date)
                     
                     if df.empty:
                         continue
                         
-                    # 특성 추출 및 라벨링
+                    # 특성 추출만 수행 (라벨링 제거)
                     df = extract_features(df)
-                    df = label_data(df, signal_group)  # 해당 그룹의 날짜만 전달
                     
-                    if df.empty:
-                        continue
+                    if not df.empty:
+                        # 모델 훈련 - 직접 signal_group과 estimated_profit_rates 전달
+                        model = train_ppo_model(df, signal_group, estimated_profit_rates)
                         
-                    # 모델 훈련
-                    X = df[COLUMNS_TRAINING_DATA]
-                    y = df['Label']
-                    model = train_model(X, y, use_saved_params and not first_stock, param_file)
-                    
-                    # 모델 평가 및 저장
-                    if model:
-                        # 기존 코드와 동일한 평가 및 저장 로직
-                        # 훈련 정보 출력
-                        print(f"Model trained for {code_name} from {start_date} to {end_date}")
-                        
-                        # 가장 좋은 모델을 선택하기 위해 성능 평가
-                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                        y_pred = model.predict(X_test)
-                        accuracy = accuracy_score(y_test, y_pred)
-                        
+                        # 모델 평가
+                        if model:
+                            print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                            
+                            # 강화학습 모델에 맞는 평가 함수 사용
+                            accuracy = evaluate_ppo_model(model, df, signal_group, estimated_profit_rates)
+            
                         if accuracy > best_accuracy or best_model is None:
                             best_model = model
                             best_accuracy = accuracy
@@ -593,7 +521,7 @@ if __name__ == '__main__':
         # 모델 저장 (이제 best_model을 사용)
         if best_model:
             print("Saving best model...")  # 모델 저장 시 디버깅 메시지 추가
-            best_model.save_model(model_filename)
+            best_model.save(model_filename)  # .save_weights() 대신 전체 모델 저장
             print(f"Best model saved as {model_filename} with accuracy: {best_accuracy:.4f}")
             message = f"Best model saved as {model_filename} with accuracy: {best_accuracy:.4f}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
@@ -628,7 +556,7 @@ if __name__ == '__main__':
                 if validation_date in processed_dates:
                     continue  # 이미 처리된 날짜는 건너뜀
                 start_date_1200 = validation_date - timedelta(days=1200)
-                df = load_daily_craw_data(craw_db, table_name, start_date_1200, validation_date)
+                df = load_daily_craw_data(connection_manager, table_name, start_date_1200, validation_date)
                 
                 if not df.empty:
                     print(f"Data for {table_name} loaded successfully for validation on {validation_date}")
@@ -639,14 +567,14 @@ if __name__ == '__main__':
                     
                     if not df.empty:
                         # Predict patterns
-                        result = predict_pattern(model, df, table_name, use_data_dates=False)
+                        result = predict_pattern_with_ppo(model, df, table_name, use_data_dates=False)
                         if not result.empty:
                             # 중복된 날짜가 추가되지 않도록 수정
                             result = result[~result['date'].isin(processed_dates)]
                             validation_results = pd.concat([validation_results, result])
                             processed_dates.update(result['date'])  # 처리된 날짜를 추가
                             print("\nPattern found.")
-                                
+        
         if not validation_results.empty:
             validation_results['date'] = pd.to_datetime(validation_results['date'])
             validation_results = validation_results.sort_values(by='date')
@@ -664,14 +592,14 @@ if __name__ == '__main__':
             # 향후 60일 동안의 최고 수익률 검증
             print("\nEvaluating performance for the next 60 days")
             performance_results = []
-          
+            
             for index, row in enumerate(validation_results.iterrows()):
                 code_name = row[1]['stock_code']
                 pattern_date = row[1]['date']
                 performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
                 performance_end_date = performance_start_date + pd.Timedelta(days=60)
                 
-                df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
+                df = load_daily_craw_data(connection_manager, code_name, performance_start_date, performance_end_date)
                 print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
                 
                 if not df.empty:
@@ -688,17 +616,16 @@ if __name__ == '__main__':
                         print(f"No valid return found for {code_name} from {performance_start_date} to {performance_end_date}")
                 
                 # 진행 상황 출력
-                # or를 ||로 바꾸지 말 것 
+                # or를 ||로 바꾸지 말 것
                 if (index + 1) % 100 == 0 or (index + 1) == len(validation_results):
                     print(f"Evaluated performance for {index + 1}/{len(validation_results)} patterns")
-            
             performance_df = pd.DataFrame(performance_results)
             print("\nPerformance results:")
             print(performance_df)
             
             # 성능 결과를 데이터베이스에 저장
-            save_performance_to_db(performance_df, buy_list_db, performance_table)
-
+            save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)
+            
             # Performance 끝난 후 텔레그램 메시지 보내기
             message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}\n Performance results: {performance_df}"
             send_telegram_message(telegram_token, telegram_chat_id, message)
@@ -710,3 +637,43 @@ if __name__ == '__main__':
 
     else:
         print("Error in main execution: No filtered stock results loaded")
+
+# 6. model_dir 정의
+model_dir = './models/'
+if not os.path.exists(model_dir):
+    os.makedirs(model_dir)
+
+# 7. 성능 평가 함수 추가 (missing)
+def evaluate_performance(df, start_date, end_date):
+    try:
+        # 날짜 형식을 문자열에서 datetime으로 변환
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # 시작일의 종가를 기준가로 설정
+        start_close = df.loc[df['date'].dt.date == start_date.date(), 'close'].values
+        if len(start_close) == 0:
+            print(f"No start close price found for {start_date.date()}")
+            return None
+        base_price = start_close[0]
+        
+        # 최대 수익률 계산
+        df['return_rate'] = (df['close'] - base_price) / base_price * 100
+        max_return = df['return_rate'].max()
+        
+        return max_return
+    except Exception as e:
+        print(f"Error evaluating performance: {e}")
+        return None
+
+# 8. DB 저장 함수 추가 (missing)
+def save_performance_to_db(performance_df, host, user, password, database, table):
+    try:
+        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
+        
+        performance_df.to_sql(table, engine, if_exists='append', index=False)
+        print(f"Performance results saved to {database}.{table}")
+        return True
+    except Exception as e:
+        print(f"Error saving performance results to database: {e}")
+        return False
+

@@ -18,40 +18,35 @@ from sklearn.metrics import accuracy_score  # 추가
 from tensorflow.keras.layers import InputLayer
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.layers import BatchNormalization
+# 새로 추가: DBConnectionManager 임포트
+from db_connection import DBConnectionManager
 
-def load_filtered_stock_results(host, user, password, database, table):
+# 기존 함수를 DBConnectionManager를 사용하도록 수정
+def load_filtered_stock_results(db_manager, table):
     try:
-        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
         query = f"SELECT * FROM {table}"
-        df = pd.read_sql(query, engine)
+        df = db_manager.execute_query(query)
         return df
-    except SQLAlchemyError as e:
+    except Exception as e:
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
-def load_daily_craw_data(host, user, password, database, table, start_date, end_date):
+def load_daily_craw_data(db_manager, table, start_date, end_date):
     try:
-        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
         start_date_str = start_date.strftime('%Y%m%d')
         end_date_str = end_date.strftime('%Y%m%d')
         print(f"Loading data from {start_date_str} to {end_date_str} for table {table}")
-        if end_date_str:
-            query = f"""
-                SELECT * FROM `{table}`
-                WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
-                ORDER BY date ASC
-            """
-        else:
-            query = f"""
-                SELECT * FROM `{table}`
-                WHERE date >= '{start_date_str}'
-                ORDER BY date ASC
-            """
-        print(f"Executing query: {query}")
-        df = pd.read_sql(query, engine)
+        
+        query = f"""
+            SELECT * FROM `{table}`
+            WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
+            ORDER BY date ASC
+        """
+        
+        df = db_manager.execute_query(query)
         print(f"Data loaded from {start_date_str} to {end_date_str} for table {table}: {len(df)} rows")
         return df
-    except SQLAlchemyError as e:
+    except Exception as e:
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
@@ -385,13 +380,16 @@ def evaluate_performance(df, start_date, end_date):
         print(f'Error evaluating performance: {e}')
         return None
 
-def save_performance_to_db(df, host, user, password, database, table):
+# 성능 결과 저장 함수도 수정
+def save_performance_to_db(df, db_manager, table):
     try:
-        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
-        df.to_sql(table, engine, if_exists='append', index=False)
-        print(f"Performance results saved to {table} table in {database} database")
-    except SQLAlchemyError as e:
+        result = db_manager.to_sql(df, table)
+        if result:
+            print(f"Performance results saved to {table} table in {db_manager.database} database")
+        return result
+    except Exception as e:
         print(f"Error saving performance results to MySQL: {e}")
+        return False
 
 import os
 
@@ -425,8 +423,12 @@ if __name__ == '__main__':
         ]
     print("Starting lstm training...")
     
+    # DBConnectionManager 인스턴스 생성
+    buy_list_db = DBConnectionManager(host, user, password, database_buy_list)
+    craw_db = DBConnectionManager(host, user, password, database_craw)
+    
     # Load filtered stock results
-    filtered_results = load_filtered_stock_results(host, user, password, database_buy_list, results_table)
+    filtered_results = load_filtered_stock_results(buy_list_db, results_table)
     
     if not filtered_results.empty:
         print("Filtered stock results loaded successfully")
@@ -533,7 +535,7 @@ if __name__ == '__main__':
                     start_date = end_date - timedelta(days=1200)
                     
                     print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
-                    df = load_daily_craw_data(host, user, password, database_craw, code_name, start_date, end_date)
+                    df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
                     
                     if df.empty:
                         continue
@@ -618,7 +620,7 @@ if __name__ == '__main__':
                 if validation_date in processed_dates:
                     continue  # 이미 처리된 날짜는 건너뜀
                 start_date_1200 = validation_date - timedelta(days=1200)
-                df = load_daily_craw_data(host, user, password, database_craw, table_name, start_date_1200, validation_date)
+                df = load_daily_craw_data(craw_db, table_name, start_date_1200, validation_date)
                 
                 if not df.empty:
                     print(f"Data for {table_name} loaded successfully for validation on {validation_date}")
@@ -661,7 +663,7 @@ if __name__ == '__main__':
                 performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
                 performance_end_date = performance_start_date + pd.Timedelta(days=60)
                 
-                df = load_daily_craw_data(host, user, password, database_craw, code_name, performance_start_date, performance_end_date)
+                df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
                 print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
                 
                 if not df.empty:
@@ -687,7 +689,7 @@ if __name__ == '__main__':
             print(performance_df)
             
             # 성능 결과를 데이터베이스에 저장
-            save_performance_to_db(performance_df, host, user, password, database_buy_list, performance_table)
+            save_performance_to_db(performance_df, buy_list_db, performance_table)
 
             # Performance 끝난 후 텔레그램 메시지 보내기
             message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}\n Performance results: {performance_df}"
