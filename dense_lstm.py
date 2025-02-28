@@ -19,9 +19,19 @@ from tensorflow.keras.layers import InputLayer
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.layers import BatchNormalization
 
+# SQLAlchemy 연결 풀 설정
+from sqlalchemy.pool import QueuePool
+
 def load_filtered_stock_results(host, user, password, database, table):
     try:
-        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
+        engine = create_engine(
+            f'mysql+pymysql://{user}:{password}@{host}/{database}',
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800
+        )
         query = f"SELECT * FROM {table}"
         df = pd.read_sql(query, engine)
         return df
@@ -31,7 +41,14 @@ def load_filtered_stock_results(host, user, password, database, table):
 
 def load_daily_craw_data(host, user, password, database, table, start_date, end_date):
     try:
-        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
+        engine = create_engine(
+            f'mysql+pymysql://{user}:{password}@{host}/{database}',
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800
+        )
         start_date_str = start_date.strftime('%Y%m%d')
         end_date_str = end_date.strftime('%Y%m%d')
         print(f"Loading data from {start_date_str} to {end_date_str} for table {table}")
@@ -387,7 +404,14 @@ def evaluate_performance(df, start_date, end_date):
 
 def save_performance_to_db(df, host, user, password, database, table):
     try:
-        engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{database}')
+        engine = create_engine(
+            f'mysql+pymysql://{user}:{password}@{host}/{database}',
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800
+        )
         df.to_sql(table, engine, if_exists='append', index=False)
         print(f"Performance results saved to {table} table in {database} database")
     except SQLAlchemyError as e:
@@ -428,6 +452,10 @@ if __name__ == '__main__':
     # Load filtered stock results
     filtered_results = load_filtered_stock_results(host, user, password, database_buy_list, results_table)
     
+    # filtered_results에서 일부만 사용
+    sample_size = 100  # 원하는 샘플 수
+    filtered_results = filtered_results.sample(n=min(sample_size, len(filtered_results)))
+
     if not filtered_results.empty:
         print("Filtered stock results loaded successfully")
         
