@@ -1284,11 +1284,11 @@ def setup_validation_environment(settings):
     print(f"검증 기간: {validation_start} ~ {validation_end}")
     
     # 검증 기간이 너무 짧거나 부적절한 경우 조정
-    if (validation_end - validation_start).days < 5:
-        print("⚠️ 검증 기간이 너무 짧습니다. 기본값으로 설정합니다.")
-        validation_end = datetime.now().date()
-        validation_start = validation_end - timedelta(days=30)  # 기본값 30일
-        print(f"조정된 검증 기간: {validation_start} ~ {validation_end}")
+    # if (validation_end - validation_start).days < 5:
+    #     print("⚠️ 검증 기간이 너무 짧습니다. 기본값으로 설정합니다.")
+    #     validation_end = datetime.now().date()
+    #     validation_start = validation_end - timedelta(days=30)  # 기본값 30일
+    #     print(f"조정된 검증 기간: {validation_start} ~ {validation_end}")
     
     # 종목 목록 가져오기
     try:
@@ -1356,7 +1356,7 @@ def validate_single_stock(model, code_name, craw_db, validation_start, validatio
     
     # print(df.head())
     # print(df.tail())
-
+    # input("Press Enter to continue...")
     # 특성 추출
     df = extract_features(df)
     
@@ -1713,9 +1713,10 @@ def print_validation_summary(results_df, filtered_results, settings):
               f"예상수익률: {row['max_profit_rate']:.2f}%")
 
 def save_results_to_deep_learning_table(filtered_results, settings):
-    """검증 결과를 deep_learning 테이블에 저장합니다."""
+    """검증 결과를 deep_learning 테이블에 저장하고 텔레그램으로 전송합니다."""
     buy_list_db = settings['buy_list_db']
     results_to_save = filtered_results['top_signals_by_date']
+    print("\n===== deep_learning 테이블에 결과 저장 =====")
     
     try:
         # 기존 데이터 삭제 - execute_update_query 사용
@@ -1724,6 +1725,11 @@ def save_results_to_deep_learning_table(filtered_results, settings):
         delete_query = f"DELETE FROM deep_learning WHERE date >= '{start_date}' AND date <= '{end_date}' AND method = 'ppo'"
         buy_list_db.execute_update_query(delete_query)
         
+        # 텔레그램 메시지 준비
+        telegram_message = "📊 deep_learning 테이블에 결과 저장\n\n"
+        max_message_length = 4000  # 텔레그램 메시지 최대 길이
+        current_message_length = len(telegram_message)
+        
         # 새로운 데이터 삽입 - execute_update_query 사용
         for _, row in results_to_save.iterrows():
             insert_query = f"""
@@ -1731,6 +1737,22 @@ def save_results_to_deep_learning_table(filtered_results, settings):
                 VALUES ('{row['date']}', 'ppo', '{row['code_name']}', {row['confidence']}, {row['max_profit_rate']})
             """
             buy_list_db.execute_update_query(insert_query)
+            
+            # 텔레그램 메시지에 종목 정보 추가
+            new_message = f"📈 {row['date']} {row['code_name']}: 신뢰도 {row['confidence']:.4f}, 예상수익률 {row['max_profit_rate']:.2f}%\n"
+            current_message_length += len(new_message)
+            
+            # 메시지가 너무 길어지면 전송하고 초기화
+            if current_message_length > max_message_length:
+                send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], telegram_message)
+                telegram_message = "📊 deep_learning 테이블에 결과 저장\n\n" + new_message
+                current_message_length = len(telegram_message)
+            else:
+                telegram_message += new_message
+        
+        # 남은 메시지 전송
+        if telegram_message.strip():
+            send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], telegram_message)
         
         print("검증 결과가 deep_learning 테이블에 성공적으로 저장되었습니다.")
         return True

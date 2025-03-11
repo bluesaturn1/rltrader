@@ -1,25 +1,24 @@
-from sqlalchemy import create_engine
-from sqlalchemy.pool import QueuePool
+# Description: 데이터베이스 연결 관리자 클래스를 정의합니다.
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import text
 import pandas as pd
 import time
 import pymysql
 
 class DBConnectionManager:
     def __init__(self, host, user, password, database):
+        """데이터베이스 연결 관리자를 초기화합니다."""
+        # 먼저 connection string 생성
+        self.connection_string = f"mysql+pymysql://{user}:{password}@{host}/{database}"
+        
+        # 연결 엔진 생성
+        self.engine = create_engine(self.connection_string)
+        
+        # 데이터베이스 정보 저장
         self.host = host
         self.user = user
         self.password = password
         self.database = database
-        self.engine = create_engine(
-            self.connection_string,
-            poolclass=QueuePool,
-            pool_size=5,          # 풀에서 유지할 최대 연결 수
-            max_overflow=10,       # pool_size 이상으로 생성할 수 있는 최대 연결 수
-            pool_timeout=30,       # 연결 획득 대기 시간(초)
-            pool_recycle=1800      # 연결 재사용 시간(초)
-        )
     
     def execute_update_query(self, query):
         """
@@ -48,40 +47,15 @@ class DBConnectionManager:
                     raise
         return pd.DataFrame()  # 모든 시도 실패 시 빈 데이터프레임 반환
 
-    def create_connection(self):
-        try:
-            connection = pymysql.connect(
-                host=self.host,
-                user=self.user,
-                password=self.password,
-                database=self.database,
-                cursorclass=pymysql.cursors.DictCursor
-            )
-            return connection
-        except Exception as e:
-            print(f"Error creating connection to database: {e}")
-            return None
-
-    def execute_query(self, query):
-        try:
-            with self.connection.cursor() as cursor:
-                cursor.execute(query)
-                result = cursor.fetchall()
-                return pd.DataFrame(result)
-        except Exception as e:
-            print(f"Error executing query: {e}")
-            return pd.DataFrame()
-
     def to_sql(self, df, table):
         try:
-            engine = create_engine(f'mysql+pymysql://{self.user}:{self.password}@{self.host}/{self.database}')
-            df.to_sql(name=table, con=engine, if_exists='append', index=False)
+            df.to_sql(name=table, con=self.engine, if_exists='append', index=False)
             return True
         except SQLAlchemyError as e:
             print(f"Error saving data to MySQL: {e}")
             return False
 
     def close(self):
-        if hasattr(self, 'connection') and self.connection:
-            self.connection.close()
+        if hasattr(self, 'engine') and self.engine:
+            self.engine.dispose()
             print("Database connection closed.")
