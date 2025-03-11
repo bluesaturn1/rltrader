@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 import pandas as pd
 import time
 
@@ -18,6 +19,19 @@ class DBConnectionManager:
             pool_recycle=1800      # 연결 재사용 시간(초)
         )
     
+    def execute_update_query(self, query):
+        """
+        INSERT, UPDATE, DELETE 쿼리와 같은 데이터 수정 쿼리를 실행합니다.
+        """
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text(query))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"Query execution error: {e}")
+            return False
+
     def execute_query(self, query, retries=3, delay=5):
         """재시도 로직이 포함된 SQL 쿼리 실행"""
         for attempt in range(retries):
