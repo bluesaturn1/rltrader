@@ -843,14 +843,74 @@ def evaluate_performance_improved(df, start_date, end_date):
         return None
 
 # 성능 결과 저장 함수도 수정
-def save_performance_to_db(df, db_manager, table):
+def save_lstm_predictions_to_db(db_manager, predictions_df, model_name=None):
+    """LSTM 예측 결과를 deep_learning 테이블에 저장합니다."""
     try:
-        result = db_manager.to_sql(df, table)
-        if result:
-            print(f"Performance results saved to {table} table in {db_manager.database} database")
-        return result
+        # 필요한 컬럼만 추출하고 테이블 형식에 맞게 컬럼명 변경
+        dl_data = predictions_df[['pattern_date', 'code_name', 'prediction', 'risk_adjusted_return']].copy()
+        # 모델 이름 설정 (제공된 이름이 없으면 'lstm' 사용)
+        method_name = model_name if model_name else 'lstm'
+        dl_data['method'] = method_name
+        
+        # 컬럼명 변경
+        dl_data = dl_data.rename(columns={
+            'pattern_date': 'date',    
+            'prediction': 'confidence',
+            'risk_adjusted_return': 'estimated_profit_rate'  # max_return을 estimated_profit_rate로 변환
+        })
+        
+        
+        # 기존 데이터 중복 확인을 위한 코드명, 날짜, 메소드 조합 가져오기
+        existing_query = f"""
+            SELECT DISTINCT date, code_name, method FROM deep_learning
+        """
+        existing_data = db_manager.execute_query(existing_query)
+        
+        if not existing_data.empty:
+            # date, code_name, method를 튜플로 묶어 중복 확인용 세트 생성
+            existing_pairs = set()
+            for _, row in existing_data.iterrows():
+                # 날짜 형식 통일 (문자열 비교 시 오류 방지)
+                date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
+                existing_pairs.add((date, row['code_name'], row['method']))
+                
+            # 저장할 데이터를 필터링하여 중복 제거
+            new_data = []
+            duplicate_count = 0
+            
+            for idx, row in dl_data.iterrows():
+                # 날짜 형식 통일
+                date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
+                pair = (date, row['code_name'], row['method'])
+                
+                if pair not in existing_pairs:
+                    new_data.append(row)
+                else:
+                    duplicate_count += 1
+            
+            if duplicate_count > 0:
+                print(f"Skipping {duplicate_count} duplicate entries already in the database.")
+                
+            if not new_data:
+                print("All entries already exist in the database. Nothing to save.")
+                return True
+                
+            # 중복 제거된 데이터만 저장
+            dl_data = pd.DataFrame(new_data)
+            
+        # 저장할 데이터가 있는 경우에만 저장 진행
+        if not dl_data.empty:
+            result = db_manager.to_sql(dl_data, 'deep_learning')  # if_exists와 index 파라미터 제거
+            if result:
+                print(f"✅ {len(dl_data)}개 {method_name} 예측 결과를 deep_learning 테이블에 저장했습니다.")
+            return result
+        else:
+            print("No new data to save after duplicate filtering.")
+            return True
     except Exception as e:
-        print(f"Error saving performance results to MySQL: {e}")
+        print(f"❌ 예측 결과 저장 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def validate_by_date_window(model, db_manager, stock_items, validation_start_date, validation_end_date):
@@ -927,7 +987,6 @@ def validate_by_date_window(model, db_manager, stock_items, validation_start_dat
     print(f"\n검증 완료: 총 {total_patterns_found}개 패턴 발견")
     return pd.DataFrame(all_results)
 
-
 def analyze_top_performers_by_date(performance_df, top_n=5):
     """날짜별로 상위 성과를 보인 종목을 분석"""
     try:
@@ -940,17 +999,19 @@ def analyze_top_performers_by_date(performance_df, top_n=5):
         
         # 각 날짜별로 처리
         for date, group in date_grouped:
-            # 위험 조정 수익률 기준 상위 종목 선택
-            top_stocks = group.nlargest(top_n, 'risk_adjusted_return')
+            print(f"\n날짜: {date} - Prediction 기준 상위 {top_n}개 종목")
+            # prediction 기준 상위 종목 선택
+            top_stocks = group.nlargest(top_n, 'prediction')
+            print(top_stocks[['code_name', 'prediction', 'max_return', 'max_loss', 'risk_adjusted_return']])
             
             # 날짜별 요약 통계
             date_summary = {
                 'date': date,
                 'total_patterns': len(group),
-                'avg_risk_adjusted_return': group['risk_adjusted_return'].mean(),  # 이름 변경
+                'avg_risk_adjusted_return': group['risk_adjusted_return'].mean(),
                 'avg_max_return': group['max_return'].mean(),
                 'avg_max_loss': group['max_loss'].mean(),
-                'top_performer': top_stocks.iloc[0]['code_name'] if len(top_stocks) > 0 else None,  # stock_code → code_name
+                'top_performer': top_stocks.iloc[0]['code_name'] if len(top_stocks) > 0 else None,
                 'top_return': top_stocks.iloc[0]['risk_adjusted_return'] if len(top_stocks) > 0 else None
             }
             
@@ -965,82 +1026,67 @@ def analyze_top_performers_by_date(performance_df, top_n=5):
         traceback.print_exc()
         return [], pd.DataFrame()
 
+
 def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     validation_results = pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
-    processed_pairs = set()  # 이미 처리한 (종목, 날짜) 쌍 추적
-    suspended_stocks = []  # 정지종목 목록
+    processed_pairs = set()
+    suspended_stocks = []
 
-    validation_start_date = validation_chunks[0]
-    validation_end_date = validation_chunks[-1]
+    validation_end_date = validation_chunks[0]  # 마지막 날짜
+    
+    print(f"마지막 날짜({validation_end_date}) 기준으로만 예측을 수행합니다.")
 
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), desc="종목 검증", total=len(stock_items)):
         code_name = row.code_name
         print(f"\n검증 중인 종목: {code_name}")
         try:
-            # 정지종목 확인 - 검증 기간 동안의 데이터 로드
-            suspension_check_df = load_daily_craw_data(
-                craw_db, 
-                code_name, 
-                validation_start_date, 
-                validation_end_date
-            )
+            # 전체 기간 데이터를 한 번에 로드
+            window_start_date = validation_end_date - timedelta(days=1200)
+            all_df = load_daily_craw_data(craw_db, code_name, window_start_date, validation_end_date)
             
-            # 검증 기간 동안 데이터가 있고 모든 거래량이 0인 경우 정지종목으로 간주
-            if not suspension_check_df.empty:
-                if len(suspension_check_df) >= 5 and all(volume == 0 for volume in suspension_check_df['volume']):
-                    print(f"⚠️ {code_name} - 정지종목으로 감지됨 (검증 기간 동안 거래량 0)")
-                    suspended_stocks.append(code_name)
-                    continue  # 정지종목이므로 다음 종목으로 넘어감
-
-            # 각 청크에 대해 한 번만 데이터 로드
-            all_df = pd.DataFrame()
-            for chunk_idx, (chunk_start, chunk_end) in enumerate(zip(validation_chunks[:-1], validation_chunks[1:])):
-                window_start_date = chunk_start - timedelta(days=1200)
+            if all_df.empty:
+                print(f"⚠️ {code_name} - 데이터가 없습니다. 건너뜁니다.")
+                continue
                 
-                # 이미 충분한 데이터가 있으면 로드하지 않음
-                if not all_df.empty and len(all_df) >= 500:
-                    continue
-                
-                df = load_daily_craw_data(craw_db, code_name, window_start_date, chunk_end)
-                if not df.empty and len(df) >= 250:
-                    if all_df.empty:
-                        all_df = df
-                    else:
-                        # 기존 데이터와 병합 시 중복 제거
-                        all_df = pd.concat([all_df, df]).drop_duplicates(subset=['date'])
+            # 날짜 형식을 datetime으로 변환
+            all_df['date'] = pd.to_datetime(all_df['date'])
             
-            # 거래량이 모두 0이면 정지종목으로 간주하고 건너뛰기
-            if not all_df.empty and len(all_df) >= 20:
-                recent_data = all_df.sort_values(by='date').tail(20)
-                if all(volume == 0 for volume in recent_data['volume']):
-                    print(f"⚠️ {code_name} - 정지종목으로 감지됨 (최근 20일간 거래량 0)")
-                    suspended_stocks.append(code_name)
-                    continue
+            # 정지 종목 확인
+            suspension_check_df = all_df.copy()
+            if len(suspension_check_df) >= 5 and all(volume == 0 for volume in suspension_check_df['volume']):
+                print(f"⚠️ {code_name} - 정지종목으로 감지됨 (검증 기간 동안 거래량 0)")
+                suspended_stocks.append(code_name)
+                continue
+            
+            # 마지막 날짜에 데이터가 없으면 가장 최근 날짜 사용
+            last_dates = all_df['date'].unique()
+            if validation_end_date not in all_df['date'].values:
+                last_date = all_df['date'].max()
+                print(f"⚠️ {validation_end_date} 데이터가 없어 가장 최근 날짜 {last_date} 사용")
+                current_date = last_date
+            else:
+                current_date = validation_end_date
+            
+            # 마지막 날짜 기준으로 과거 500봉 데이터 추출
+            df_window = all_df[all_df['date'] <= current_date].tail(900).copy()
+            # 특성 추출
+            df_features = extract_features(df_window)
+            if len(df_window) >= 500:   
+                # 500봉을 자른다
+                df_features = df_features.iloc[-500:].copy()             
+                result = predict_pattern_optimized(best_model, df_features, code_name, use_data_dates=False)
+                
+                if isinstance(result, pd.DataFrame) and not result.empty:
+                    # 결과 병합
+                    validation_results = pd.concat([validation_results, result], ignore_index=True)
 
-            # 충분한 데이터가 있으면 한 번만 특성 추출 및 예측
-            if not all_df.empty and len(all_df) >= 250:
-                df_features = extract_features(all_df)
-                if not df_features.empty:
-                    if len(df_features) > 500:
-                        df_features = df_features.iloc[-500:].copy()
-                    
-                    result = predict_pattern_optimized(best_model, df_features, code_name, use_data_dates=False)
-                    if isinstance(result, pd.DataFrame) and not result.empty:
-                        # 중복 제거하면서 병합
-                        if validation_results.empty:
-                            validation_results = result
-                        else:
-                            # 이미 있는 (종목, 날짜) 쌍 제외하고 추가
-                            for _, row in result.iterrows():
-                                pair_key = (row['code_name'], row['date'])
-                                if pair_key not in processed_pairs:
-                                    validation_results = pd.concat([validation_results, pd.DataFrame([row])], ignore_index=True)
-                                    processed_pairs.add(pair_key)
         except Exception as e:
             print(f"Error processing {code_name}: {e}")
-    
+
     # 최종 중복 제거
-    validation_results = validation_results.drop_duplicates(subset=['code_name', 'date'])
+    validation_results = validation_results.drop_duplicates(subset=['code_name'])
+    print("\n검증 결과:")
+    print(validation_results)
     return validation_results
 
 
@@ -1063,17 +1109,28 @@ def filter_top_n_per_date(validation_results, top_n_per_date=5):
     
     return validation_results
 
+
 def evaluate_performance(validation_results, craw_db):
     performance_results = []
     for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="성능 평가", position=0):
         code_name = row['code_name']
         pattern_date = row['date']
         prediction_value = row['Prediction']
-        performance_start_date = pattern_date + pd.Timedelta(days=1)
-        performance_end_date = performance_start_date + pd.Timedelta(days=60)
+
+        # 오늘이 마지막 날짜면, 오늘 데이터로만 평가
+        today = datetime.now().date()
+        if pattern_date.date() == today:
+            performance_start_date = pattern_date
+            performance_end_date = pattern_date
+        else:
+            performance_start_date = pattern_date + pd.Timedelta(days=1)
+            performance_end_date = performance_start_date + pd.Timedelta(days=60)            
+        
         df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
         print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
+        
         if not df.empty:
+            # 데이터가 있는 경우 성능 평가
             perf_result = evaluate_performance_improved(df, performance_start_date, performance_end_date)
             if perf_result is not None:
                 result_dict = {
@@ -1091,134 +1148,228 @@ def evaluate_performance(validation_results, craw_db):
                 performance_results.append(result_dict)
             else:
                 print(f"No valid return found for {code_name} from {performance_start_date} to {performance_end_date}")
+                # 성능 데이터가 계산되지 않았지만, 결과에는 포함시킴 (모든 값은 0으로 설정)
+                result_dict = {
+                    'code_name': code_name,
+                    'pattern_date': pattern_date,
+                    'prediction': prediction_value,
+                    'start_date': performance_start_date,
+                    'end_date': performance_end_date,
+                    'max_return': 0.0,
+                    'max_return_day': None,
+                    'max_loss': 0.0,
+                    'max_loss_day': None,
+                    'risk_adjusted_return': 0.0
+                }
+                performance_results.append(result_dict)
         else:
             print(f"No data loaded for {code_name} from {performance_start_date} to {performance_end_date}")
+            # 데이터가 없는 경우도 결과에 포함시킴 (모든 성능 값은 0으로 설정)
+            result_dict = {
+                'code_name': code_name,
+                'pattern_date': pattern_date,
+                'prediction': prediction_value,
+                'start_date': performance_start_date,
+                'end_date': performance_end_date,
+                'max_return': 0.0,
+                'max_return_day': None,
+                'max_loss': 0.0,
+                'max_loss_day': None,
+                'risk_adjusted_return': 0.0
+            }
+            performance_results.append(result_dict)
+            
         if (index + 1) % 100 == 0 or (index + 1) == len(validation_results):
             print(f"Processed {index + 1}/{len(validation_results)} validation results")
+            
     return pd.DataFrame(performance_results)
 
-
-def send_validation_summary(validation_results, performance_df, telegram_token, telegram_chat_id, results_table, buy_list_db, model_name='lstm'):
-    if not validation_results.empty and 'code_name' in validation_results.columns:
-        unique_stock_codes = validation_results['code_name'].nunique()
-        print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
-    else:
-        print("\nNo validation results found with code_name column")
-        unique_stock_codes = 0
-
-    message = f"Validation completed. Number of unique stock codes found during validation: {unique_stock_codes}"
-    send_telegram_message(telegram_token, telegram_chat_id, message)
-
-    if not performance_df.empty:
-        print("\nPerformance results:")
-        print(performance_df)
-
-        save_performance_to_db(performance_df, buy_list_db, performance_table)
-
-        message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}"
-        send_telegram_message(telegram_token, telegram_chat_id, message)
-
-        top_performers, date_summary = analyze_top_performers_by_date(performance_df, top_n=5)
-
-        print("\n===== 전체 성능 요약 =====")
-        print(f"총 검증 종목 수: {len(performance_df)}")
-        print(f"평균 최대 수익률: {performance_df['max_return'].mean():.2f}%")
-        print(f"평균 최대 손실률: {performance_df['max_loss'].mean():.2f}%")
-        print(f"평균 위험조정 수익률: {performance_df['risk_adjusted_return'].mean():.2f}%")
-        print(f"위험조정 수익률 중앙값: {performance_df['risk_adjusted_return'].median():.2f}%")
-
-        print("\n===== 날짜별 성능 요약 =====")
-        print(date_summary.sort_values(by='avg_risk_adjusted_return', ascending=False))
-        
-        print("\n===== 위험조정 수익률 기준 상위 5개 종목 =====")
-        top5_overall = performance_df.nlargest(5, 'risk_adjusted_return')
-        print(top5_overall[['code_name', 'pattern_date', 'max_return', 'max_loss', 'risk_adjusted_return']])
-
-        print("\n===== 날짜별 최고 종목 =====")
-        for result in top_performers:
-            date = result['date']
-            top_stocks = result['top_stocks']
-
-            if not top_stocks.empty:
-                print(f"\n날짜: {date} - 상위 {len(top_stocks)}개 종목")
-                print(top_stocks[['code_name', 'max_return', 'max_loss', 'risk_adjusted_return']])
-
-        print("\n===== 날짜별 Prediction 값 기준 상위 5개 종목 성과 =====")
-        performance_df['pattern_date'] = pd.to_datetime(performance_df['pattern_date'])
-        pred_date_groups = performance_df.groupby(performance_df['pattern_date'].dt.date)
-        
-        # 모든 날짜의 상위 예측 종목을 저장할 리스트
-        all_top_predictions = []
-
-        for date, group in pred_date_groups:
-            top_by_prediction = group.sort_values(by='prediction', ascending=False).head(5)
-
-            if not top_by_prediction.empty:
-                print(f"\n날짜: {date} - Prediction 기준 상위 5개 종목")
-                print(top_by_prediction[['code_name', 'prediction', 'max_return', 'max_loss', 'risk_adjusted_return']])
-                
-                # 텔레그램으로 전송
-                message = f"📊 날짜: {date} - LSTM 예측 상위 5개 종목\n"
-                for idx, row in top_by_prediction.iterrows():
-                    message += f"{row['code_name']}: 신뢰도 {row['prediction']:.4f}, 예상수익률 {row['max_return']:.2f}%\n"
-                send_telegram_message(telegram_token, telegram_chat_id, message)
-                
-                # 데이터베이스에 저장할 데이터 준비
-                db_data = top_by_prediction.copy()
-                db_data['date'] = date  # 날짜 컬럼 추가
-                all_top_predictions.append(db_data)
-        
-        # 모든 날짜의 상위 예측 종목을 하나의 DataFrame으로 합치기
-        if all_top_predictions:
-            all_predictions_df = pd.concat(all_top_predictions)
-            
-            # 전달받은 모델 이름 사용
-            print(f"Saving prediction results with model name: {model_name}")
-            
-            # deep_learning 테이블에 저장 (모델 이름 전달)
-            save_lstm_predictions_to_db(buy_list_db, all_predictions_df, model_name)
-        # 상관계수 계산 시 예외 처리 추가
-        try:
-            if len(performance_df) > 1:
-                correlation = performance_df['prediction'].corr(performance_df['max_return'])
-                risk_adj_correlation = performance_df['prediction'].corr(performance_df['risk_adjusted_return'])
-                print(f"\n예측값-최대수익률 상관계수: {correlation:.4f}")
-                print(f"예측값-위험조정수익률 상관계수: {risk_adj_correlation:.4f}")
-            else:
-                print("\n데이터가 충분하지 않아 상관계수를 계산할 수 없습니다.")
-        except Exception as e:
-            print(f"Error calculating correlation: {e}")
-
-        # ... 나머지 코드는 동일하게 유지 ...
-
-
-def save_lstm_predictions_to_db(db_manager, predictions_df, model_name=None):
-    """LSTM 예측 결과를 deep_learning 테이블에 저장합니다."""
+def save_performance_to_db(df, db_manager, table):
+    """성능 평가 결과를 데이터베이스 테이블에 저장합니다."""
     try:
-        # 필요한 컬럼만 추출하고 테이블 형식에 맞게 컬럼명 변경
-        dl_data = predictions_df[['date', 'code_name', 'prediction', 'max_return']].copy()
+        # 데이터가 비어있으면 바로 반환
+        if df.empty:
+            print("No performance data to save.")
+            return False
+
+        # 테이블 존재 여부 확인
+        check_query = f"SHOW TABLES LIKE '{table}'"
+        check_result = db_manager.execute_query(check_query)
         
-        # 모델 이름 설정 (제공된 이름이 없으면 'lstm' 사용)
-        method_name = model_name if model_name else 'lstm'
-        dl_data['method'] = method_name
+        # 테이블이 존재하지 않으면 생성
+        if check_result.empty:
+            print(f"Table {table} does not exist. Creating it...")
+            create_table_query = f"""
+            CREATE TABLE `{table}` (
+                `id` int NOT NULL AUTO_INCREMENT,
+                `code_name` varchar(20) NOT NULL,
+                `date` datetime NOT NULL,
+                `prediction` float NOT NULL,
+                `start_date` datetime NULL,
+                `end_date` datetime NULL,
+                `max_return` float NULL,
+                `max_return_day` datetime NULL,
+                `max_loss` float NULL,
+                `max_loss_day` datetime NULL,
+                `estimated_profit_rate` float NULL,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `unique_record` (`code_name`,`date`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+            db_manager.execute_query(create_table_query)
+            print(f"Table {table} created successfully")
+            table_columns = ['id', 'code_name', 'date', 'prediction', 'start_date', 'end_date', 'max_return', 'max_return_day', 'max_loss', 'max_loss_day', 'estimated_profit_rate']
+        else:
+            # 테이블 구조 확인
+            structure_query = f"DESCRIBE {table}"
+            table_structure = db_manager.execute_query(structure_query)
+            
+            if not table_structure.empty:
+                print(f"테이블 구조 확인: {table}")
+                print(table_structure)
+                
+                # 테이블의 컬럼명 가져오기
+                table_columns = table_structure['Field'].tolist()
+                print(f"테이블 컬럼: {table_columns}")
+            else:
+                print(f"테이블 {table}의 구조를 확인할 수 없습니다.")
+                return False
         
-        # 컬럼명 변경
-        dl_data = dl_data.rename(columns={
-            'prediction': 'confidence',
-            'max_return': 'estimated_profit_rate'
-        })
+        # 데이터프레임 컬럼 출력
+        print(f"데이터프레임 컬럼: {df.columns.tolist()}")
         
-        # 데이터베이스에 저장 (DBConnectionManager의 to_sql 메소드에 맞게 수정)
-        result = db_manager.to_sql(dl_data, 'deep_learning')  # if_exists와 index 파라미터 제거
-        if result:
-            print(f"✅ {len(dl_data)}개 {method_name} 예측 결과를 deep_learning 테이블에 저장했습니다.")
-        return result
+        # 컬럼 매핑
+        column_mapping = {}
+        if 'pattern_date' in df.columns and 'date' in table_columns:
+            column_mapping['pattern_date'] = 'date'
+        if 'risk_adjusted_return' in df.columns and 'estimated_profit_rate' in table_columns:
+            column_mapping['risk_adjusted_return'] = 'estimated_profit_rate'
+        
+        # 확인된 매핑으로 컬럼명 변경
+        if column_mapping:
+            df = df.rename(columns=column_mapping)
+            print(f"컬럼명 변경: {column_mapping}")
+        
+        # 기존 데이터 중복 확인을 위한 코드명과 날짜 조합 가져오기
+        date_column = 'date'  # 기본값으로 'date' 사용
+        existing_query = f"""
+            SELECT DISTINCT code_name, {date_column} FROM {table}
+        """
+        
+        try:
+            existing_data = db_manager.execute_query(existing_query)
+        except Exception as e:
+            print(f"중복 데이터 확인 중 오류 발생: {e}")
+            existing_data = pd.DataFrame()
+        
+        if not existing_data.empty:
+            # code_name과 날짜를 튜플로 묶어 중복 확인용 세트 생성
+            existing_pairs = set()
+            for _, row in existing_data.iterrows():
+                # 날짜 형식 통일 (문자열 비교 시 오류 방지)
+                if pd.notnull(row[date_column]):
+                    date_value = pd.to_datetime(row[date_column]).strftime('%Y-%m-%d')
+                    existing_pairs.add((row['code_name'], date_value))
+            
+            # 저장할 데이터에서 date_column 찾기
+            date_column_in_df = date_column
+            if date_column not in df.columns:
+                if 'pattern_date' in df.columns:
+                    date_column_in_df = 'pattern_date'
+                elif 'date' in df.columns:
+                    date_column_in_df = 'date'
+            
+            # 저장할 데이터를 필터링하여 중복 제거
+            new_data = []
+            duplicate_count = 0
+            
+            for idx, row in df.iterrows():
+                # 날짜 형식 통일
+                if pd.notnull(row[date_column_in_df]):
+                    date_value = pd.to_datetime(row[date_column_in_df]).strftime('%Y-%m-%d')
+                    pair = (row['code_name'], date_value)
+                    
+                    if pair not in existing_pairs:
+                        new_data.append(row)
+                    else:
+                        duplicate_count += 1
+            
+            if duplicate_count > 0:
+                print(f"Skipping {duplicate_count} duplicate entries already in the database.")
+                
+            if not new_data:
+                print("All entries already exist in the database. Nothing to save.")
+                return True
+                
+            # 중복 제거된 데이터만 저장
+            df_to_save = pd.DataFrame(new_data)
+        else:
+            # 기존 데이터가 없으면 모두 저장
+            df_to_save = df
+            
+        # 저장할 데이터가 있는 경우에만 저장 진행
+        if not df_to_save.empty:
+            # 테이블 컬럼과 맞지 않는 컬럼 제거
+            columns_to_drop = [col for col in df_to_save.columns if col not in table_columns]
+            if columns_to_drop:
+                df_to_save = df_to_save.drop(columns=columns_to_drop)
+                print(f"제거된 컬럼: {columns_to_drop}")
+            
+            # 저장
+            result = db_manager.to_sql(df_to_save, table)
+            if result:
+                print(f"✅ {len(df_to_save)} performance results saved to {table} table")
+            return result
+        else:
+            print("No new data to save after duplicate filtering.")
+            return True
+            
     except Exception as e:
-        print(f"❌ 예측 결과 저장 중 오류 발생: {e}")
+        print(f"❌ Error saving performance results to MySQL: {e}")
         import traceback
         traceback.print_exc()
         return False
 
+def send_validation_summary(validation_results, performance_df, telegram_token, telegram_chat_id, results_table, buy_list_db, model_name='lstm'):
+    print("\n=== 검증 결과 요약 ===")
+    
+    print(f"총 예측 수: {len(validation_results)}")
+    print(f"성과 평가 수: {len(performance_df)}")
+    
+    if not performance_df.empty:
+        # 총 수익률 통계
+        avg_return = performance_df['max_return'].mean()
+        max_return = performance_df['max_return'].max()
+        min_return = performance_df['max_return'].min()
+        
+        print(f"평균 최대 수익률: {avg_return:.2f}%")
+        print(f"최고 수익률: {max_return:.2f}%")
+        print(f"최저 수익률: {min_return:.2f}%")
+        
+        try:
+            # 날짜별 상위 종목 분석
+            results, summaries = analyze_top_performers_by_date(performance_df, top_n=5)
+            
+            print("\n===== 날짜별 Prediction 값 기준 상위 5개 종목 성과 =====")
+            
+            for result in results:
+                date = result['date']
+                top_stocks = result['top_stocks']
+                print(f"\n날짜: {date} - Prediction 기준 상위 5개 종목")
+                print(top_stocks[['code_name', 'prediction', 'max_return', 'max_loss', 'risk_adjusted_return']])
+            
+            # DB에 저장
+            if buy_list_db is not None:
+                # LSTM 결과 테이블에 저장 (기존 performance_table 대신 results_table 사용)
+                performance_table = 'dense_lstm_performance'
+                save_performance_to_db(performance_df, buy_list_db, performance_table)
+                save_lstm_predictions_to_db(buy_list_db, performance_df, model_name)
+        except Exception as e:
+            print(f"분석 중 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("성과 데이터가 비어있습니다.")
 
 def run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name='lstm'):
     print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
@@ -1231,16 +1382,38 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
     print(f"검증 기간: {validation_start_date} ~ {validation_end_date}")
     print(stock_items.head())
 
-    validation_chunks = [validation_start_date + timedelta(days=i) for i in range(0, (validation_end_date - validation_start_date).days + 1, 7)]
-    if validation_end_date not in validation_chunks:
-        validation_chunks.append(validation_end_date)
-
-    validation_results = load_validation_data(craw_db, stock_items, validation_chunks, best_model)
-    validation_results = filter_top_n_per_date(validation_results, top_n_per_date=5)
+    # 마지막 날짜만 사용하여 모든 종목에 대한 예측 수행
+    validation_chunks = [validation_end_date]
+    all_predictions = load_validation_data(craw_db, stock_items, validation_chunks, best_model)
+    print(f"전체 예측 결과 수: {len(all_predictions)}")
+    
+    # 날짜별로 일자 생성 (주말 제외)
+    validation_dates = []
+    current_date = validation_start_date
+    while current_date <= validation_end_date:
+        if current_date.weekday() < 5:  # 주말 제외
+            validation_dates.append(current_date)
+        current_date += timedelta(days=1)
+    
+    # 날짜별로 예측 결과 분배
+    validation_results = pd.DataFrame()
+    for date in validation_dates:
+        # 해당 날짜의 결과는 동일한 예측값 사용 (마지막 날짜 기준)
+        date_predictions = all_predictions.copy()
+        date_predictions['date'] = date
+        # 상위 5개 종목만 선택
+        date_top5 = date_predictions.nlargest(5, 'Prediction')
+        validation_results = pd.concat([validation_results, date_top5], ignore_index=True)
+    
+    # 중복 제거
+    validation_results = validation_results.drop_duplicates(subset=['code_name', 'date'])
+    print(f"날짜별 상위 5개 종목 결과 수: {len(validation_results)}")
+    
+    # 필터링된 종목들에 대해서만 성능 평가
     performance_df = evaluate_performance(validation_results, craw_db)
     
-    # model_name 인자 추가로 전달
     send_validation_summary(validation_results, performance_df, telegram_token, telegram_chat_id, results_table, buy_list_db, model_name)
+
 
 def get_user_choice():
     while True:
