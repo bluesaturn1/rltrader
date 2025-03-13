@@ -5,6 +5,7 @@ from mysql_loader import test_mysql_connection, list_tables_in_database, load_da
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
+from stock_utils import get_stock_items, filter_stocks
 from tqdm import tqdm
 from telegram_utils import send_telegram_message
 from datetime import timedelta
@@ -29,32 +30,6 @@ def load_data_from_mysql(host, user, password, database, table, start_date=None,
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
-def get_stock_items(host, user, password, database):
-    try:
-        print(f"Connecting to MySQL database: {database} at {host}...")
-        engine = create_engine(f"mysql+mysqldb://{user}:{password}@{host}/{database}")
-        connection = engine.connect()
-        print("Connection successful.")
-        
-        # KOSPI 종목 가져오기
-        query_kospi = "SELECT code_name, code FROM stock_kospi"
-        print(f"Executing query: {query_kospi}")
-        df_kospi = pd.read_sql(query_kospi, connection)
-        
-        # KOSDAQ 종목 가져오기
-        query_kosdaq = "SELECT code_name, code FROM stock_kosdaq"
-        print(f"Executing query: {query_kosdaq}")
-        df_kosdaq = pd.read_sql(query_kosdaq, connection)
-        
-        connection.close()
-        print("Query executed successfully.")
-        
-        # 두 DataFrame 결합
-        df = pd.concat([df_kospi, df_kosdaq], ignore_index=True)
-        return df
-    except SQLAlchemyError as e:
-        print(f"Error loading data from MySQL: {e}")
-        return pd.DataFrame()
 
 def save_results_to_mysql(results, host, user, password, database, table):
     try:
@@ -91,28 +66,6 @@ def setup_config():
     }
     return config
 
-def filter_stocks(stock_items_df):
-    """종목 필터링: 우선주 등 제외"""
-    filtered_stocks = []
-    stock_names = stock_items_df['code_name'].tolist()
-    
-    for _, row in stock_items_df.iterrows():
-        code_name = row['code_name']
-        
-        # 필터링 조건 체크
-        if code_name.endswith('2우B') or code_name.endswith('1우'):
-            print(f"Skipping excluded stock: {code_name}")
-            continue
-        
-        # 세 글자 이상인 종목에서 '우'로 끝났을 때 '우'를 제외한 이름이 이미 있는 경우 제외
-        if len(code_name) > 2 and code_name.endswith('우') and code_name[:-1] in stock_names:
-            print(f"Skipping excluded stock: {code_name}")
-            continue
-        
-        filtered_stocks.append(row)
-    
-    return pd.DataFrame(filtered_stocks)
-
 def calculate_moving_averages(df):
     """이동평균선 밀집도 계산"""
     if df.empty:
@@ -130,23 +83,43 @@ def calculate_moving_averages(df):
     
     return df
 
-def find_dense_signals(df):
-    """이동평균선 밀집 신호 찾기"""
+def find_arrow_signals(df):
+    """이동평균선 밀집 신호 및 등락률 조건을 만족하는 신호 찾기"""
     if df.empty:
         return pd.DataFrame()
-        
+    
     # 모든 이동평균선이 5% 이내로 밀집되고, 현재가가 240일선과 10% 이내이며,
     # 120일선이 240일선과 5% 이내이거나 이하이며, 거래량이 0이 아닌 데이터 찾기
     dense_dates = df[
-        (df['ma_diff1'] <= 5) & 
-        (df['ma_diff2'] <= 5) & 
-        (df['ma_diff3'] <= 5) &
+        (df['ma_diff1'] <= 5.1) & 
+        (df['ma_diff2'] <= 5.1) & 
+        (df['ma_diff3'] <= 5.1) &
         (df['ma_diff240'] <= 10) &  # 240일 이평선 조건 추가
-        (df['ma_diff120_240'] <= 5) &  # 120일선이 240일선과 5% 이내이거나 이하
+        (df['ma_diff120_240'] <= 5.1) &  # 120일선이 240일선과 5% 이내이거나 이하
         (df['volume'] > 0)  # 거래량이 0인 종목 제외
+    ].copy()
+    
+    # 1봉전 종가 대비 0봉전 종가 등락률이 2.5% 이상
+    dense_dates.loc[:, 'price_change_1d'] = (dense_dates['close'] / dense_dates['close'].shift(1) - 1) * 100
+    # 0봉전 시가 대비 종가 등락률이 2.5% 이상
+    dense_dates.loc[:, 'price_change_open'] = (dense_dates['close'] / dense_dates['open'] - 1) * 100
+    
+    # 오늘 고가가 최근 5봉 중 신고가
+    dense_dates.loc[:, 'is_highest_in_5'] = dense_dates['high'] == dense_dates['high'].rolling(window=5).max()
+    
+    # 5봉 평균 거래량이 30,000 이상
+    dense_dates.loc[:, 'avg_volume_5'] = dense_dates['volume'].rolling(window=5).mean()
+    
+    # 등락률 조건과 신고가 조건을 만족하는 데이터 필터링
+    arrow_signals = dense_dates[
+        (dense_dates['price_change_1d'] >= 2.5) &
+        (dense_dates['price_change_open'] >= 2.5) &
+        (dense_dates['is_highest_in_5']) &
+        (dense_dates['avg_volume_5'] >= 30000)
     ]
     
-    return dense_dates
+    return arrow_signals
+
 
 def analyze_future_performance(config, code_name, dense_date):
     """미래 성과 분석"""
@@ -214,7 +187,7 @@ def process_stock(config, code_name, stock_names):
     df = calculate_moving_averages(df)
     
     # 신호 찾기
-    dense_dates = find_dense_signals(df)
+    dense_dates = find_arrow_signals(df)
     
     if dense_dates.empty:
         return []
@@ -223,7 +196,7 @@ def process_stock(config, code_name, stock_names):
     for dense_date in dense_dates['date']:
         performance = analyze_future_performance(config, code_name, dense_date)
         
-        if performance and performance['estimated_profit_rate'] >= 50:
+        if performance and performance['estimated_profit_rate'] >= 75:
             performance['code_name'] = code_name
             performance['signal_date_last'] = performance['signal_date']  # 초기화 시 같은 값으로 설정
             
@@ -267,10 +240,10 @@ def process_all_stocks(config):
         performance_results.extend(stock_results)
         
         # 중간 저장
-        if (index + 1) % save_interval == 0:
-            print(f"\nSaving intermediate performance results at index {index + 1}...")
-            save_results_to_mysql(performance_results, config['host'], config['user'], 
-                                  config['password'], config['database_buy_list'], config['results_table'])
+        # if (index + 1) % save_interval == 0:
+        #     print(f"\nSaving intermediate performance results at index {index + 1}...")
+        #     save_results_to_mysql(performance_results, config['host'], config['user'], 
+        #                           config['password'], config['database_buy_list'], config['results_table'])
     
     return performance_results
 
