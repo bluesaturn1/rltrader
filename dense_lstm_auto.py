@@ -122,7 +122,7 @@ def select_stocks_for_training(filtered_results):
     print("3. 랜덤 선택 (예: random 30)")
     
     choice = input("선택 방법을 입력하세요 (1/2/3): ")
-    
+
     if choice == '1':
         try:
             range_input = input("훈련에 사용할 종목 범위를 입력하세요 (예: 1-50): ")
@@ -688,8 +688,8 @@ def predict_pattern(model, df, stock_code, use_data_dates=True):
                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
             else:
                 # cf.py에 설정된 검증 기간 사용 (외부 검증용)
-                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE_AUTO).zfill(8), format='%Y%m%d')
+                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE_AUTO).zfill(8), format='%Y%m%d')
             
             print(f"Validation period: {validation_start_date} to {validation_end_date}")
             
@@ -715,7 +715,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=True):
         except Exception as e:
             print(f"Error in date processing: {e}")
             print(f"Debug info - df['date'] sample: {df['date'].head()}")
-            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE}")
+            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE_AUTO}")
             return pd.DataFrame(columns=['date', 'stock_code'])
             
     except Exception as e:
@@ -859,8 +859,8 @@ def predict_pattern_optimized(model, df, code_name, use_data_dates=True):
             validation_start_date = max_date + pd.Timedelta(days=1)
             validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
         else:
-            validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-            validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+            validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE_AUTO).zfill(8), format='%Y%m%d')
+            validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE_AUTO).zfill(8), format='%Y%m%d')
         print(f"Validation period: {validation_start_date} to {validation_end_date}")
         recent_patterns = df_result[
             (df_result['Prediction'] > 0) & 
@@ -1116,7 +1116,7 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     validation_results = pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
     
     validation_end_date = validation_chunks[0]  # 마지막 날짜
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
+    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE_AUTO).zfill(8), format='%Y%m%d')
     
     print(f"마지막 날짜({validation_end_date}) 기준으로 예측을 수행하고 {validation_start_date}~{validation_end_date} 기간의 결과를 수집합니다.")
 
@@ -1439,7 +1439,7 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
                 message = f"날짜: {date}\n"
                 message += "종목명 | Prediction | 최대 수익률 | 최대 손실 | 위험 조정 수익률\n"
                 for _, row in top_stocks.iterrows():
-                    message += f"{row['code_name']} | {row['prediction']:.2f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
+                    message += f"{row['code_name']} | {row['prediction']:.4f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
                 send_telegram_message(telegram_token, telegram_chat_id, message)
             # DB에 저장
             if buy_list_db is not None:
@@ -1455,9 +1455,9 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
         print("성과 데이터가 비어있습니다.")
 
 def run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name='lstm'):
-    print(f"\n마지막 날짜 기준 검증 수행: {cf.VALIDATION_START_DATE} ~ {cf.VALIDATION_END_DATE}")
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-    validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+    print(f"\n마지막 날짜 기준 검증 수행: {cf.VALIDATION_START_DATE_AUTO} ~ {cf.VALIDATION_END_DATE_AUTO}")
+    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE_AUTO).zfill(8), format='%Y%m%d')
+    validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE_AUTO).zfill(8), format='%Y%m%d')
 
     stock_items = get_stock_items(host, user, password, database_buy_list)
     total_stock_items = len(stock_items)
@@ -1498,7 +1498,8 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
 
 def get_user_choice():
     while True:
-        choice = input("Do you want to retrain the model? (yes/new/continue/validate/summary/no): ").strip().lower()
+        #choice = input("Do you want to retrain the model? (yes/new/continue/validate/summary/no): ").strip().lower()
+        choice = 'validate'
         if choice in ['yes', 'new', 'continue', 'validate', 'summary', 'no']:
             return choice
         else:
@@ -1512,7 +1513,8 @@ def load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, curr
             for i, file in enumerate(model_files):
                 print(f"{i + 1}. {file}")
                 
-            model_choice = int(input("Select a model to validate (number): ")) - 1
+            # model_choice = int(input("Select a model to validate (number): ")) - 1
+            model_choice = 0
             if 0 <= model_choice < len(model_files):
                 model_file = os.path.join(model_dir, model_files[model_choice])
                 best_model = tf.keras.models.load_model(model_file)

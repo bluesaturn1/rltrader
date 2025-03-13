@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from dense_finding import get_stock_items  # get_stock_items 함수를 가져옵니다.
+from stock_utils import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
@@ -35,10 +35,25 @@ def load_filtered_stock_results(db_manager, table):
     try:
         query = f"SELECT * FROM {table}"
         df = db_manager.execute_query(query)
+        
+        # 데이터 로드 후 열 이름 출력
+        print(f"Columns in {table}: {df.columns.tolist()}")
+        
+        if df.empty:
+            print(f"No data found in table {table}")
+        else:
+            print(f"Loaded {len(df)} rows from {table}")
+            
+            # 날짜 형식 확인
+            for col in df.columns:
+                if 'date' in col.lower():
+                    print(f"Date column found: {col}, sample values: {df[col].head().tolist()}")
+        
         return df
     except Exception as e:
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
+
 
 def load_daily_craw_data(db_manager, table, start_date, end_date):
     try:
@@ -439,7 +454,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': 'xgboost',
+                'method': 'firearrow',
                 'code_name': row['stock_code'],
                 'confidence': 0,  # 고정값 0
                 'estimated_profit_rate': row['max_return']
@@ -544,8 +559,10 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     save_xgboost_to_deep_learning_table(performance_df, buy_list_db)
 
     # Performance 끝난 후 텔레그램 메시지 보내기
+    send_telegram_message(telegram_token, telegram_chat_id, performance_df.to_string())
     message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}\nAverage max return: {performance_df['max_return'].mean():.2f}%"
     send_telegram_message(telegram_token, telegram_chat_id, message)
+    
 
 def save_performance_to_db(df, db_manager, table):
     try:
@@ -568,7 +585,7 @@ def setup_environment():
     password = cf.MYSQL_PASSWORD
     database_buy_list = cf.MYSQL_DATABASE_BUY_LIST
     database_craw = cf.MYSQL_DATABASE_CRAW
-    results_table = cf.FINDING_SKYROCKET_TABLE
+    results_table = cf.FINDING_FIREARROW_TABLE
     performance_table = cf.RECOGNITION_PERFORMANCE_TABLE
     telegram_token = cf.TELEGRAM_BOT_TOKEN
     telegram_chat_id = cf.TELEGRAM_CHAT_ID
@@ -851,7 +868,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
                 # 500봉만 잘라서 검증
                 if len(df) > 500:
                     df = df[-500:]
-                if not df.empty:
+                if not df.empty:    
                     # Predict patterns - settings 인자 추가
                     result = predict_pattern(model, df, table_name, use_data_dates=False, settings=settings)
                     if not result.empty:
@@ -882,7 +899,6 @@ def validate_model(model, buy_list_db, craw_db, settings):
     
     return validation_results
 
-
 def main():
     """메인 실행 함수"""
     # 환경 설정
@@ -896,6 +912,26 @@ def main():
         return
     
     print("Filtered stock results loaded successfully")
+    print("Column names in filtered_results:")
+    print(filtered_results.columns.tolist())
+    
+    # 데이터 검증 및 열 이름 수정
+    if 'signal_date' not in filtered_results.columns:
+        # 'signal_date' 열이 없을 경우 대체 열 찾기
+        possible_date_columns = ['date', 'signal_date_last', 'pattern_date']
+        date_column_found = False
+        
+        for col in possible_date_columns:
+            if col in filtered_results.columns:
+                print(f"Found date column: {col}, renaming to 'signal_date'")
+                filtered_results['signal_date'] = filtered_results[col]
+                date_column_found = True
+                break
+        
+        if not date_column_found:
+            print("Error: No suitable date column found in filtered_results")
+            print("Available columns:", filtered_results.columns.tolist())
+            return
     
     # 모델 로드 또는 훈련 선택
     best_model, best_accuracy, retrain = load_or_train_model(buy_list_db, craw_db, filtered_results, settings)
@@ -919,6 +955,7 @@ def main():
     
     # 성능 평가
     evaluate_model_performance(validation_results, buy_list_db, craw_db, settings)
+
 
 if __name__ == '__main__':
     main()
