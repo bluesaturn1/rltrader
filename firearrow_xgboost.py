@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, learning_curve
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from sklearn.metrics import f1_score, make_scorer
 import os
@@ -16,6 +16,7 @@ from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 �
 from datetime import datetime, timedelta
 from imblearn.over_sampling import SMOTE
 from db_connection import DBConnectionManager
+import matplotlib.pyplot as plt
 
 
 def execute_update_query(self, query):
@@ -141,7 +142,7 @@ def label_data(df, signal_dates):
         df['Label'] = 0  # 기본값을 0으로 설정
         df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
         
-        # signal_dates를 올바른 형식으로 변환하고, 잘못된 형식의 날짜를 처리
+        # signal_dates를 올바른 형식으로 변환하고, 중복 제거
         valid_signal_dates = []
         for date in signal_dates:
             try:
@@ -150,9 +151,30 @@ def label_data(df, signal_dates):
             except ValueError:
                 print(f"Invalid date format: {date}")
         
-        # 날짜 정렬
-        valid_signal_dates.sort()
-        print(f'Signal dates: {valid_signal_dates}')
+        # 중복 제거하고 날짜 정렬
+        valid_signal_dates = sorted(list(set(valid_signal_dates)))
+        print(f'Unique signal dates: {valid_signal_dates}')
+        
+        # 시그널이 5개 미만이면 마지막 5개 봉을 라벨 1로 설정
+        if len(valid_signal_dates) < 5:
+            # 데이터프레임에서 마지막 5개 날짜 가져오기
+            all_dates = sorted(df['date'].unique())
+            if len(all_dates) > 0:
+                # 마지막 5개 봉에 라벨 1 부여 (데이터가 5개 미만이면 있는 만큼만)
+                last_n = min(5, len(all_dates))
+                for i in range(len(all_dates) - last_n, len(all_dates)):
+                    last_date = all_dates[i]
+                    df.loc[df['date'] == last_date, 'Label'] = 1
+                    print(f"Added label 1 to last date: {last_date}")
+                    
+                print(f"Applied label 1 to last {last_n} candles due to having <5 signals")
+                
+                # 시그널이 1개 이상인 경우에만 기존 처리 로직 계속 진행
+                if len(valid_signal_dates) >= 1:
+                    print("Continuing with regular signal grouping logic...")
+                else:
+                    print("No valid signals, using only last candles labeling.")
+                    return df
         
         if len(valid_signal_dates) > 0:
             # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
@@ -179,24 +201,14 @@ def label_data(df, signal_dates):
                 start_date = min(group)
                 end_date = max(group)
                 
-                # 원래 신호 날짜들을 3등분하여 라벨 부여
-                n = len(group)
-                first_third = group[:n//3] if n > 2 else group
-                second_third = group[n//3:2*n//3] if n > 2 else []
-                last_third = group[2*n//3:] if n > 2 else []
-                
-                # 원본 신호 날짜에 라벨(1,2,3) 부여
+                # 이진 분류로 변경 - 모든 신호 날짜에 라벨 1 부여
                 signal_labels = {}
-                for date in first_third:
+                for date in group:
                     signal_labels[date] = 1
-                for date in second_third:
-                    signal_labels[date] = 2
-                for date in last_third:
-                    signal_labels[date] = 3
                 
                 # 각 신호 날짜를 데이터프레임에 적용
                 sorted_dates = df[(df['date'] >= start_date) & (df['date'] <= end_date)]['date'].unique()
-                sorted_dates.sort()
+                sorted_dates = sorted(sorted_dates)
                 
                 # 각 날짜에 대해 처리
                 current_label = 0
@@ -216,16 +228,16 @@ def label_data(df, signal_dates):
         
         # 첫 5개와 마지막 10개의 라벨 출력
         print("First 5 labels:")
-        print(df[['date', 'Label']].head(3))
+        print(df[['date', 'Label']].head(5))
         print("Last 10 labels:")
-        print(df[['date', 'Label']].tail(15))
+        print(df[['date', 'Label']].tail(10))
 
         return df
     except Exception as e:
         print(f'Error labeling data: {e}')
         import traceback
-        traceback.print_exc()  # 상세한 traceback 정보 출력
-        return pd.DataFrame()
+        traceback.print_exc()
+        return df
 
 def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
     try:
@@ -236,11 +248,13 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         print("Class distribution in y:")
         print(y.value_counts())
         
-        # Calculate class weights
-        class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
-        for class_label, weight in y.value_counts(normalize=True).items():
-            class_weights[class_label] = weight
-        
+            
+        # 클래스 가중치 계산
+        class_weights = {0: 1, 1: 1}  # 이진 분류용 (클래스 0, 1)
+
+        for class_label, weight in y.value_counts(normalize=True).items():  # y_train 대신 y 사용
+            class_weights[class_label] = 1/weight
+
         sample_weights = np.array([1/class_weights[yi] for yi in y])
         
         print(f"use_saved_params: {use_saved_params}")  # use_saved_params 값 출력
@@ -250,12 +264,13 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
             print("Loading saved parameters...")
             try:
                 best_params = joblib.load(param_file)
+                # XGBClassifier 초기화 부분 수정
                 model = xgb.XGBClassifier(
                     **best_params,
                     random_state=42,
-                    objective='multi:softmax',
-                    num_class=4,
-                    eval_metric='mlogloss'
+                    objective='binary:logistic',  # 'multi:softmax' 대신 'binary:logistic' 사용
+                    # num_class=4 파라미터 제거
+                    eval_metric='logloss'  # 'mlogloss' 대신 'logloss' 사용
                 )
                 print("Model loaded with saved parameters.")
             except Exception as e:
@@ -264,25 +279,27 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         else:
             print("Tuning hyperparameters...")
             param_grid = {
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 6, 9],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'subsample': [0.8, 1.0],
-                'colsample_bytree': [0.8, 1.0],
-                'min_child_weight': [1, 3, 5]
+                'n_estimators': [50, 100],
+                'max_depth': [2, 3, 4],      # 깊이 줄이기
+                'learning_rate': [0.01, 0.05], # 더 작은 학습률
+                'subsample': [0.7, 0.8],     # 데이터 샘플링 비율 줄이기
+                'colsample_bytree': [0.7, 0.8], # 특성 샘플링 비율 줄이기
+                'min_child_weight': [3, 5, 7], # 값 증가로 모델 단순화
+                'gamma': [0.5, 1.0],         # 정규화 증가
+                'reg_alpha': [0.1, 0.5, 1.0], # L1 정규화 추가
+                'reg_lambda': [1.0, 2.0]     # L2 정규화 추가
             }
             
             base_model = xgb.XGBClassifier(
                 random_state=42,
-                objective='multi:softmax',
-                num_class=4,
-                eval_metric='mlogloss'
             )
             
+            # GridSearchCV 부분 수정
+            tscv = TimeSeriesSplit(n_splits=3)
             grid_search = GridSearchCV(
                 estimator=base_model,
                 param_grid=param_grid,
-                cv=3,
+                cv=tscv,  # TimeSeriesSplit 사용
                 scoring='f1_weighted',
                 n_jobs=-1,
                 verbose=2
@@ -298,31 +315,195 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
             print("Model trained with new parameters.")
         
         if model is not None:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            # 모델 파라미터 조정
+            model = xgb.XGBClassifier(
+                n_estimators=100,  # 50 → 100으로 증가
+                max_depth=4,       # 3 → 4로 증가
+                learning_rate=0.05,  # 0.1 → 0.05로 감소
+                min_child_weight=2,  # 모델 복잡도 개선
+                subsample=0.8,      # 과적합 방지
+                colsample_bytree=0.8,  # 과적합 방지
+                gamma=0.1,          # 정규화 
+                scale_pos_weight=5  # 클래스 불균형 처리
+            )
+            # train_test_split 부분 수정
+            # 시간 순서대로 데이터 분할
+            train_size = int(len(X) * 0.7)
+            val_size = int(len(X) * 0.1)
+            X_train = X[:train_size]
+            X_val = X[train_size:train_size+val_size]
+            X_test = X[train_size+val_size:]
+            y_train = y[:train_size]
+            y_val = y[train_size:train_size+val_size]
+            y_test = y[train_size+val_size:]
             
-            # Calculate weights for training set
-            train_class_weights = {0: 1, 1: 1, 2: 1, 3: 1}  # 모든 클래스에 대한 기본 가중치 설정
+            # 검증 세트 설정
+            eval_set = [(X_train, y_train), (X_val, y_val)]
+
+            # 가중치 계산
+            # 클래스 가중치 계산
+            train_class_weights = {0: 1, 1: 1}  # 이진 분류용 (클래스 0, 1) - 변수 이름 변경
+
             for class_label, weight in y_train.value_counts(normalize=True).items():
-                train_class_weights[class_label] = weight
+                train_class_weights[class_label] = 1/weight
+
+            train_weights = np.array([train_class_weights[yi] for yi in y_train])
+                        
+            # SMOTE는 이미 임포트되어 있음
+
+            # 훈련 데이터에만 적용 (테스트 데이터는 원래 분포 유지)
+            # SMOTE 적용 전에 클래스 개수 확인
+            unique_classes = np.unique(y_train)
+            if len(unique_classes) > 1:  # 클래스가 2개 이상일 때만 SMOTE 적용
+                smote = SMOTE(random_state=42)
+                X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+                print(f"원본 클래스 분포: {pd.Series(y_train).value_counts()}")
+                print(f"SMOTE 후 클래스 분포: {pd.Series(y_train_resampled).value_counts()}")
+            else:
+                # 클래스가 하나만 있는 경우 SMOTE를 건너뜁니다
+                print(f"경고: 훈련 데이터에 클래스가 하나만 존재합니다. SMOTE를 건너뜁니다.")
+                print(f"단일 클래스: {unique_classes[0]}, 샘플 수: {len(y_train)}")
+                X_train_resampled = X_train
+                y_train_resampled = y_train
+
+            from sklearn.feature_selection import SelectFromModel
+
+            # 특성 중요도 기반 특성 선택
+            selector = SelectFromModel(
+                xgb.XGBClassifier(n_estimators=100, max_depth=3),
+                threshold="median"
+            )
+            selector.fit(X_train, y_train)
+            X_train_selected = selector.transform(X_train)
+            X_val_selected = selector.transform(X_val)
+            X_test_selected = selector.transform(X_test)
+
+            print(f"원래 특성 수: {X_train.shape[1]}")
+            print(f"선택된 특성 수: {X_train_selected.shape[1]}")
+
+            # 선택된 특성으로 훈련 부분 수정
+            # from xgboost.callback import EarlyStopping - 이 줄은 필요 없음
+
+            # early_stop = EarlyStopping(
+            #     rounds=10,
+            #     save_best=True
+            # )
+
+            # 특성 선택 없이 전체 특성으로 학습
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=True
+            )
+            # early_stopping_rounds 파라미터 제거
+        
             
-            train_weights = np.array([1/train_class_weights[yi] for yi in y_train])
-            
-            # Train final model with weights
-            model.fit(X_train, y_train, sample_weight=train_weights)
-            
-            y_pred = model.predict(X_test)
+            y_pred = model.predict(X_test_selected)
             print(f'Accuracy: {accuracy_score(y_test, y_pred)}')
             print('Classification Report:')
             print(classification_report(y_test, y_pred))
+
+            # 여러 모델 훈련
+            models = []
+            for seed in [42, 123, 456, 789, 101]:
+                model = xgb.XGBClassifier(
+                    n_estimators=100, max_depth=3, 
+                    learning_rate=0.01, subsample=0.8,
+                    reg_alpha=0.5, reg_lambda=1.0,
+                    random_state=seed
+                )
+                model.fit(X_train, y_train)
+                models.append(model)
+
+            # 과적합 평가
+            overfitting_metrics = evaluate_overfitting(model, X_train, y_train, X_test, y_test)
+            
+            # 학습 곡선 그리기
+            learning_curve_path = plot_learning_curves(model, X, y)
+            
+            # 특성 중요도 그리기 - 수정된 부분: X.columns 사용
+            feature_importance_path = plot_feature_importance(model, X.columns)
+            
+            # 혼동 행렬 그리기
+            confusion_matrix_path = plot_confusion_matrix(y_test, y_pred)
+            
+            # 과적합 평가 결과 반환
+            model.overfitting_metrics = overfitting_metrics
         else:
             print("Model training failed.")
         
+       
         return model
     except Exception as e:
         print(f'Error training model: {e}')
         import traceback
         traceback.print_exc()  # 상세한 traceback 정보 출력
         return None
+
+
+def custom_time_series_split(X, y, test_size=0.2, min_signals_per_fold=1):
+    """
+    시계열 데이터를 분할하되, 각 폴드에 최소한의 시그널을 보장합니다.
+    """
+    # 시그널 인덱스 찾기
+    signal_indices = np.where(y == 1)[0]
+    n_signals = len(signal_indices)
+    
+    if n_signals < 2:
+        raise ValueError("최소 2개 이상의 시그널이 필요합니다.")
+    
+    # 훈련용 시그널과 테스트용 시그널 분리
+    n_test_signals = max(1, int(n_signals * test_size))
+    n_train_signals = n_signals - n_test_signals
+    
+    # 시간 순서 유지를 위해 테스트 세트는 항상 나중 데이터로
+    train_signal_indices = signal_indices[:n_train_signals]
+    test_signal_indices = signal_indices[n_train_signals:]
+    
+    # 데이터 분할 인덱스 계산 (마지막 훈련 시그널 이후의 모든 데이터는 테스트 세트)
+    split_idx = test_signal_indices[0]
+    
+    # 각 세트에 시그널이 포함되었는지 확인
+    train_indices = np.arange(split_idx)
+    test_indices = np.arange(split_idx, len(X))
+    
+    print(f"훈련 세트 크기: {len(train_indices)}, 시그널 수: {(y.iloc[train_indices] == 1).sum()}")
+    print(f"테스트 세트 크기: {len(test_indices)}, 시그널 수: {(y.iloc[test_indices] == 1).sum()}")
+    
+    # 훈련 데이터와 테스트 데이터 반환
+    return train_indices, test_indices
+
+def evaluate_all_models(models_dict, test_data_dict):
+    """여러 모델의 성능을 종합적으로 평가합니다."""
+    overall_results = {}
+    for code_name, model in models_dict.items():
+        if code_name in test_data_dict:
+            X_test, y_test = test_data_dict[code_name]
+            score = model.score(X_test, y_test)
+            overall_results[code_name] = score
+    
+    # 전체 성능 통계 계산
+    avg_score = np.mean(list(overall_results.values()))
+    print(f"Average model accuracy: {avg_score:.4f}")
+    return overall_results
+
+from sklearn.model_selection import TimeSeriesSplit
+
+def evaluate_with_cross_validation(model, X, y, cv=5):
+    """시계열 데이터에 적합한 교차 검증을 통해 모델의 성능을 평가합니다."""
+    tscv = TimeSeriesSplit(n_splits=cv)
+    cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='accuracy')
+    print(f"Time Series Cross-validation scores: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+    print(f"Individual fold scores: {cv_scores}")
+    
+    # 나머지 코드는 동일
+    # ...
+    
+    return {
+        'cv_scores': cv_scores,
+        'mean_cv_score': cv_scores.mean(),
+        'cv_std': cv_scores.std()
+    }
 
 def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
@@ -337,7 +518,11 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
      
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
-        predictions = model.predict(X)
+        
+        # 예측 임계값을 낮춰 더 많은 패턴 포착
+        predictions_proba = model.predict_proba(X)
+        predictions = (predictions_proba[:, 1] > 0.3).astype(int)  # 0.5 대신 0.3 사용
+        
         df = df.loc[X.index]  # 동일한 인덱스를 유지
         df['Prediction'] = predictions
         print(f'Patterns predicted: {len(predictions)} total predictions')
@@ -457,7 +642,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
                 'method': 'firearrow',
                 'code_name': row['stock_code'],
                 'confidence': 0,  # 고정값 0
-                'estimated_profit_rate': row['max_return']
+                'estimated_profit_rate': round(row['max_return'], 2)  # 소수점 2자리로 반올림
             })
         
         # 데이터프레임 생성
@@ -536,7 +721,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
-                'max_return': max_return
+                'max_return': round(max_return,2)  # 소수점 2자리로 반올림
             })
         
         # 진행 상황 출력
@@ -574,6 +759,161 @@ def save_performance_to_db(df, db_manager, table):
         print(f"Error saving performance results to MySQL: {e}")
         return False
 
+def evaluate_overfitting(model, X_train, y_train, X_test, y_test):
+    """모델의 과적합 여부를 평가합니다."""
+    # 훈련 데이터와 테스트 데이터에 대한 예측
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+    
+    # 성능 측정
+    train_accuracy = accuracy_score(y_train, y_train_pred)
+    test_accuracy = accuracy_score(y_test, y_test_pred)
+    
+    # F1 스코어로 평가 (불균형 데이터에 더 적합)
+    train_f1 = f1_score(y_train, y_train_pred, average='weighted')
+    test_f1 = f1_score(y_test, y_test_pred, average='weighted')
+    
+    # 클래스별 성능 (특히 클래스 1(시그널)에 주목)
+    # 훈련 데이터의 클래스별 성능
+    train_report = classification_report(y_train, y_train_pred, output_dict=True)
+    # 테스트 데이터의 클래스별 성능
+    test_report = classification_report(y_test, y_test_pred, output_dict=True)
+    
+    # 클래스 1의 F1 점수 추출
+    try:
+        train_class1_f1 = train_report['1']['f1-score']
+        test_class1_f1 = test_report['1']['f1-score']
+        print(f"Class 1 F1 Score - Train: {train_class1_f1:.4f}, Test: {test_class1_f1:.4f}")
+    except KeyError:
+        # 예측에 클래스 1이 없을 수 있음
+        print("Warning: Class 1 not found in predictions")
+    
+    # 과적합 정도 계산
+    overfitting_ratio = train_accuracy / test_accuracy if test_accuracy > 0 else float('inf')
+    f1_overfitting_ratio = train_f1 / test_f1 if test_f1 > 0 else float('inf')
+    
+    print(f"Training accuracy: {train_accuracy:.4f}")
+    print(f"Testing accuracy: {test_accuracy:.4f}")
+    print(f"Training F1: {train_f1:.4f}")
+    print(f"Testing F1: {test_f1:.4f}")
+    print(f"Accuracy overfitting ratio: {overfitting_ratio:.4f}")
+    print(f"F1 overfitting ratio: {f1_overfitting_ratio:.4f}")
+    
+    # 과적합 판단 기준
+    if overfitting_ratio > 1.2:
+        print("Warning: Model shows signs of overfitting based on accuracy!")
+        
+    if f1_overfitting_ratio > 1.2:
+        print("Warning: Model shows signs of overfitting based on F1 score!")
+    
+    return {
+        'train_accuracy': train_accuracy,
+        'test_accuracy': test_accuracy,
+        'train_f1': train_f1,
+        'test_f1': test_f1,
+        'accuracy_overfitting_ratio': overfitting_ratio,
+        'f1_overfitting_ratio': f1_overfitting_ratio
+    }
+
+
+def plot_learning_curves(model, X, y):
+    """시계열 데이터에 적합한 학습 곡선을 그립니다."""
+    tscv = TimeSeriesSplit(n_splits=5)
+    train_sizes, train_scores, test_scores = learning_curve(
+        estimator=model,
+        X=X,
+        y=y,
+        train_sizes=np.linspace(0.1, 1.0, 10),
+        cv=tscv,  # TimeSeriesSplit 사용
+        scoring='accuracy',
+        n_jobs=-1
+    )
+    # 나머지 코드는 동일
+    # ...
+    
+    # 평균 및 표준편차 계산
+    train_mean = np.mean(train_scores, axis=1)
+    train_std = np.std(train_scores, axis=1)
+    test_mean = np.mean(test_scores, axis=1)
+    test_std = np.std(test_scores, axis=1)
+    
+    # 학습 곡선 그리기
+    plt.figure(figsize=(10, 6))
+    plt.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.1, color='blue')
+    plt.fill_between(train_sizes, test_mean - test_std, test_mean + test_std, alpha=0.1, color='red')
+    plt.plot(train_sizes, train_mean, 'o-', color='blue', label='Training accuracy')
+    plt.plot(train_sizes, test_mean, 'o-', color='red', label='Cross-validation accuracy')
+    plt.title('Learning Curves')
+    plt.xlabel('Training examples')
+    plt.ylabel('Accuracy')
+    plt.legend(loc='best')
+    
+    # 그래프 저장
+    plt.savefig('learning_curves.png')
+    plt.close()
+    
+    print("Learning curves saved to learning_curves.png")
+    
+    # 과적합 여부 판단
+    final_gap = train_mean[-1] - test_mean[-1]
+    print(f"Final gap between training and validation accuracy: {final_gap:.4f}")
+    if final_gap > 0.1:
+        print("Warning: The gap suggests overfitting!")
+    
+    return 'learning_curves.png'
+
+
+def plot_feature_importance(model, feature_names):
+    """특성 중요도를 시각화하여 모델이 어떤 특성을 중요시하는지 분석합니다."""
+    # 특성 중요도 정규화 - 합이 1이 되도록
+    importance = model.feature_importances_
+    if importance.sum() > 0:  # 0으로 나누기 방지
+        importance = importance / importance.sum()
+    
+    # 특성 중요도 정렬 및 출력
+    indices = np.argsort(importance)[::-1]
+    
+    print("\n정규화된 특성 중요도:")
+    for i, idx in enumerate(indices):
+        if i < 10:  # 상위 10개만 출력
+            print(f"{i+1}. {feature_names[idx]}: {importance[idx]:.8f}")
+    
+    # 나머지 코드는 동일
+    
+    plt.figure(figsize=(12, 8))
+    plt.title('Feature Importance')
+    plt.bar(range(len(importance)), importance[indices], align='center')
+    plt.xticks(range(len(importance)), [feature_names[i] for i in indices], rotation=90)
+    plt.tight_layout()
+    
+    # 그래프 저장
+    plt.savefig('feature_importance.png')
+    plt.close()
+    
+    print("Feature importance plot saved to feature_importance.png")
+    return 'feature_importance.png'
+
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+
+def plot_confusion_matrix(y_true, y_pred, classes=None):
+    """혼동 행렬을 시각화합니다."""
+    cm = confusion_matrix(y_true, y_pred)
+    
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=classes if classes else range(len(np.unique(y_true))),
+                yticklabels=classes if classes else range(len(np.unique(y_true))))
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+    plt.title('Confusion Matrix')
+    
+    # 그래프 저장
+    plt.savefig('confusion_matrix.png')
+    plt.close()
+    
+    print("Confusion matrix saved to confusion_matrix.png")
+    return 'confusion_matrix.png'    
 
 def setup_environment():
     """환경 설정 및 필요한 변수들을 초기화합니다."""
@@ -708,11 +1048,17 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
     total_models = 0
     successful_models = 0
     
+    # 중요 종목 리스트 정의 (예: 특정 관심 종목)
+    important_stocks = ['삼성전자', 'SK하이닉스', 'LG에너지솔루션']  # 원하는 중요 종목 코드 추가
+    
     # 종목별로 그룹화
     grouped_results = filtered_results.groupby('code_name')
     
     # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
     for code_name, group in tqdm(grouped_results, desc="Training models"):
+        # 현재 종목이 중요 종목인지 확인
+        important_stock = code_name in important_stocks
+        
         signal_dates = group['signal_date'].tolist()
         
         # 문자열 형태의 signal_dates를 datetime 객체로 변환
@@ -766,6 +1112,12 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
             # 모델 훈련
             X = df[COLUMNS_TRAINING_DATA]
             y = df['Label']
+
+            # 전체 데이터셋에 대한 클래스별 샘플 수 확인
+            # if (len(y) < 20) or (y.value_counts().min() < 5):
+            #     print(f"경고: {code_name} 종목은 데이터 샘플이 부족합니다. 건너뜁니다.")
+            #     continue
+
             model = train_model(X, y, use_saved_params=(not first_stock), param_file=param_file)
             
             # 모델 평가 및 저장
@@ -777,6 +1129,14 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
                 y_pred = model.predict(X_test)
                 accuracy = accuracy_score(y_test, y_pred)
+                
+                # 중요 모델에만 상세 평가 적용
+                if important_stock or group_idx == 0:  # 중요 종목이거나 첫 번째 그룹
+                    # 상세 평가 수행
+                    print_detailed_evaluation(model, X_train, y_train, X_test, y_test)
+                else:
+                    # 간소화된 평가
+                    print(f"Model trained for {code_name} - Basic accuracy: {accuracy:.4f}")
                 
                 if accuracy > best_accuracy or best_model is None:
                     best_model = model
@@ -801,6 +1161,65 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
     
     return best_model, best_accuracy
 
+def print_detailed_evaluation(model, X_train, y_train, X_test, y_test):
+    """모델의 상세한 평가 결과를 출력합니다."""
+    # 훈련 데이터와 테스트 데이터에 대한 예측
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+    
+    # 성능 측정
+    train_accuracy = accuracy_score(y_train, y_train_pred)
+    test_accuracy = accuracy_score(y_test, y_test_pred)
+    
+    print("\n===== 상세 평가 결과 =====")
+    print(f"훈련 데이터 정확도: {train_accuracy:.4f}")
+    print(f"테스트 데이터 정확도: {test_accuracy:.4f}")
+    
+    # 과적합 정도 계산
+    overfitting_ratio = train_accuracy / test_accuracy if test_accuracy > 0 else float('inf')
+    print(f"과적합 비율: {overfitting_ratio:.4f}")
+    
+    if overfitting_ratio > 1.2:
+        print("경고: 모델이 과적합 징후를 보입니다!")
+    
+    # 분류 보고서 출력
+    print("\n분류 보고서:")
+    print(classification_report(y_test, y_test_pred))
+    
+    # 혼동 행렬 출력
+    print("\n혼동 행렬:")
+    cm = confusion_matrix(y_test, y_test_pred)
+    print(cm)
+    
+    # 클래스 분포 출력
+    print("\n클래스 분포:")
+    # 여기서 y.value_counts() 제거하고 훈련/테스트 데이터만 표시
+    print("훈련 데이터:", pd.Series(y_train).value_counts().to_dict())
+    print("테스트 데이터:", pd.Series(y_test).value_counts().to_dict())
+    
+    # 특성 중요도 출력
+    # if hasattr(model, 'feature_importances_'):
+    #     print("\n상위 10개 특성 중요도:")
+    #     importance = model.feature_importances_
+    #     indices = np.argsort(importance)[::-1][:10]  # 상위 10개만
+    #     feature_names = X_train.columns
+    #     for i, idx in enumerate(indices):
+    #         if idx < len(feature_names):
+    #             print(f"{i+1}. {feature_names[idx]}: {importance[idx]:.4f}")
+    
+    print("\n특성 통계:")
+    print(X_train.describe())  # X 대신 X_train 사용
+    
+    # 특성 중요도를 더 자세한 형식으로 출력
+    importances = model.feature_importances_
+    for i, feat in enumerate(X_train.columns):  # X 대신 X_train.columns 사용
+        print(f"{feat}: {importances[i]:.8f}")  # 더 많은 소수점 자리 표시
+    
+    return {
+        'train_accuracy': train_accuracy,
+        'test_accuracy': test_accuracy,
+        'overfitting_ratio': overfitting_ratio
+    }
 
 def save_model(model, accuracy, settings):
     """학습된 모델을 저장합니다."""
@@ -922,7 +1341,7 @@ def main():
         date_column_found = False
         
         for col in possible_date_columns:
-            if col in filtered_results.columns:
+            if (col in filtered_results.columns) and (filtered_results[col].notnull().all()):
                 print(f"Found date column: {col}, renaming to 'signal_date'")
                 filtered_results['signal_date'] = filtered_results[col]
                 date_column_found = True
@@ -959,3 +1378,9 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# 예측 시 앙상블 결과 사용
+def ensemble_predict(models, X):
+    preds = np.array([model.predict_proba(X) for model in models])
+    avg_preds = preds.mean(axis=0)
+    return np.argmax(avg_preds, axis=1)
