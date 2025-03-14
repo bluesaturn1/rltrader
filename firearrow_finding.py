@@ -56,7 +56,7 @@ def setup_config():
         'password': cf.MYSQL_PASSWORD,
         'database_buy_list': cf.MYSQL_DATABASE_BUY_LIST,
         'database_craw': cf.MYSQL_DATABASE_CRAW,
-        'results_table': cf.FINDING_RESULTS_TABLE,
+        'results_table': cf.FIREARROW_RESULTS_TABLE,
         'port': cf.MYSQL_PORT,
         'search_start_date': cf.SEARCH_START_DATE,
         'search_end_date': cf.SEARCH_END_DATE,
