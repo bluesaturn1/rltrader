@@ -513,7 +513,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'stock_code'])
+            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
         X = df[COLUMNS_TRAINING_DATA]  # 지역 변수로 간결하게 사용
      
         # 무한대 값이나 너무 큰 값 제거
@@ -521,70 +521,43 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
         
         # 예측 임계값을 낮춰 더 많은 패턴 포착
         predictions_proba = model.predict_proba(X)
-        predictions = (predictions_proba[:, 1] > 0.3).astype(int)  # 0.5 대신 0.3 사용
+        predictions = (predictions_proba[:, 1] > 0).astype(int)  # 0.5 대신 0 사용
         
         df = df.loc[X.index]  # 동일한 인덱스를 유지
         df['Prediction'] = predictions
+        df['Confidence'] = predictions_proba[:, 1]  # 신뢰도(확률) 추가
         print(f'Patterns predicted: {len(predictions)} total predictions')
         print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
         
-        # 날짜 형식을 안전하게 변환
-        try:
-            # MySQL의 YYYYMMDD 형식 문자열을 datetime으로 변환
-            if df['date'].dtype == 'object':
-                # YYYYMMDD 형식의 문자열을 datetime으로 변환
-                df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
-            elif not pd.api.types.is_datetime64_any_dtype(df['date']):
-                df['date'] = pd.to_datetime(df['date'], errors='coerce')
-            
-            # NaT 값 제거
-            df = df.dropna(subset=['date'])
-            print(f"Date range in data: {df['date'].min()} to {df['date'].max()}")
-            
-            # 검증 기간 설정 부분 수정
-            if use_data_dates:
-                # 데이터의 최신 날짜 이후로 예측 검증 기간 설정 (훈련 직후 검증용)
-                max_date = df['date'].max()
-                validation_start_date = max_date + pd.Timedelta(days=1)
-                validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
-            else:
-                # cf.py에 설정된 검증 기간 사용 (외부 검증용)
-                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
-            
-            print(f"Validation period: {validation_start_date} to {validation_end_date}")
-            
-            # 검증 기간 동안의 패턴 필터링 (Prediction이 0보다 큰 경우만)
-            recent_patterns = df[
-                (df['Prediction'] > 0) & 
-                (df['date'] >= validation_start_date) & 
-                (df['date'] <= validation_end_date)
-            ].copy()
-            
-            print(f'Filtered patterns in validation period: {len(recent_patterns)}')
-            
-            if not recent_patterns.empty:
-                recent_patterns['stock_code'] = stock_code
-                result = recent_patterns[['date', 'stock_code']]
-                print(f'Found patterns for {stock_code}:')
-                print(result)
-                return result
-            else:
-                print(f'No patterns found for {stock_code} in validation period')
-                return pd.DataFrame(columns=['date', 'stock_code'])
-                
-        except Exception as e:
-            print(f"Error in date processing: {e}")
-            print(f"Debug info - df['date'] sample: {df['date'].head()}")
-            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE}")
-            return pd.DataFrame(columns=['date', 'stock_code'])
-            
+        # ... 기존 코드 ...
+        
+        # 검증 기간 동안의 패턴 필터링 (Prediction이 0보다 큰 경우만)
+        recent_patterns = df[
+            (df['Prediction'] > 0) & 
+            (df['date'] >= validation_start_date) & 
+            (df['date'] <= validation_end_date)
+        ].copy()
+        
+        print(f'Filtered patterns in validation period: {len(recent_patterns)}')
+        
+        if not recent_patterns.empty:
+            recent_patterns['stock_code'] = stock_code
+            # 신뢰도 정보 포함
+            result = recent_patterns[['date', 'stock_code', 'Confidence']]
+            print(f'Found patterns for {stock_code}:')
+            print(result)
+            return result
+        else:
+            print(f'No patterns found for {stock_code} in validation period')
+            return pd.DataFrame(columns=['date', 'stock_code', 'Confidence'])
     except Exception as e:
-        print(f'Error predicting patterns: {e}')
-        print(f'Error type: {type(e).__name__}')
+        # 예외 처리 추가
+        print(f"Error predicting patterns: {e}")
         import traceback
-        print(f'Stack trace:\n{traceback.format_exc()}')
-        return pd.DataFrame(columns=['date', 'stock_code'])
+        traceback.print_exc()
+        return pd.DataFrame(columns=['date', 'stock_code', 'Confidence'])
+
+
 
 def evaluate_performance(df, start_date, end_date):
     try:
@@ -689,9 +662,42 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     print("\nEvaluating performance for the next 60 days")
     performance_results = []
     
-    for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
+    # 중복 종목 필터링 - 각 종목별로 최대 3일치 데이터만 사용
+    filtered_validation = []
+    stock_counts = {}
+    
+    # 날짜 기준으로 정렬
+    validation_results = validation_results.sort_values('date')
+    
+    for _, row in validation_results.iterrows():
+        code_name = row['stock_code']
+        # 각 종목별 최대 횟수 제한 (3회)
+        if code_name not in stock_counts:
+            stock_counts[code_name] = 0
+        
+        if stock_counts[code_name] < 3:  # 최대 3회까지만 허용
+            filtered_validation.append(row)
+            stock_counts[code_name] += 1
+    
+    # 필터링된 결과로 데이터프레임 생성
+    filtered_results = pd.DataFrame(filtered_validation)
+    
+    if filtered_results.empty:
+        print("No filtered validation results after limiting duplicates")
+        return
+    
+    print("\nFiltered validation results (max 3 per stock):")
+    print(filtered_results)
+    
+    # 향후 60일 동안의 최고 수익률 검증
+    print("\nEvaluating performance for the next 60 days")
+    performance_results = []
+    
+    for index, row in tqdm(filtered_results.iterrows(), total=len(filtered_results), desc="Evaluating performance"):
         code_name = row['stock_code']
         pattern_date = row['date']
+        confidence = row['Confidence'] if 'Confidence' in row else 0.0
+        
         performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
         performance_end_date = performance_start_date + pd.Timedelta(days=60)
         
@@ -706,7 +712,8 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
-                'max_return': 0.0  # 데이터가 없는 경우 0 반환
+                'max_return': 0.0,  # 데이터가 없는 경우 0 반환
+                'confidence': round(confidence, 4)  # 신뢰도(확률) 추가
             })
         else:
             max_return = evaluate_performance(df, performance_start_date, performance_end_date)
@@ -721,12 +728,13 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
-                'max_return': round(max_return,2)  # 소수점 2자리로 반올림
+                'max_return': round(max_return,2),  # 소수점 2자리로 반올림
+                'confidence': round(confidence, 4)  # 신뢰도(확률) 추가
             })
         
         # 진행 상황 출력
-        if (index + 1) % 10 == 0 or (index + 1) == len(validation_results):
-            print(f"Evaluated performance for {index + 1}/{len(validation_results)} patterns")
+        if (index + 1) % 10 == 0 or (index + 1) == len(filtered_results):
+            print(f"Evaluated performance for {index + 1}/{len(filtered_results)} patterns")
     
     # 결과를 데이터프레임으로 변환
     performance_df = pd.DataFrame(performance_results)
@@ -751,6 +759,16 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
 
 def save_performance_to_db(df, db_manager, table):
     try:
+        # 기존 테이블에 confidence 필드가 있는지 먼저 확인
+        check_query = f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{table}' AND COLUMN_NAME = 'confidence'"
+        result = db_manager.execute_query(check_query)
+        
+        if result.empty:
+            print(f"'confidence' 컬럼 추가 중...")
+            db_manager.execute_update_query(f"ALTER TABLE {table} ADD COLUMN confidence FLOAT DEFAULT 0")
+        else:
+            print(f"'{table}' 테이블에 이미 'confidence' 컬럼이 존재합니다.")
+            
         result = db_manager.to_sql(df, table)
         if result:
             print(f"Performance results saved to {table} table in {db_manager.database} database")
@@ -758,6 +776,8 @@ def save_performance_to_db(df, db_manager, table):
     except Exception as e:
         print(f"Error saving performance results to MySQL: {e}")
         return False
+
+
 
 def evaluate_overfitting(model, X_train, y_train, X_test, y_test):
     """모델의 과적합 여부를 평가합니다."""
@@ -1246,18 +1266,18 @@ def save_model(model, accuracy, settings):
     return model_filename
 
 def validate_model(model, buy_list_db, craw_db, settings):
-    """학습된 모델을 검증합니다."""
+    """학습된 모델을 검증하고 날짜별 상위 예측 종목을 선택합니다."""
     telegram_token = settings['telegram_token']
     telegram_chat_id = settings['telegram_chat_id']
     results_table = settings['results_table']
-    # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
     
-    # 검증을 위해 cf.py 파일의 설정에 따라 데이터를 불러옴
     print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
     validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
     validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
-    validation_results = pd.DataFrame()
+    
+    # 모든 종목에 대한 예측 결과 저장
+    all_predictions = []
     
     # 모든 종목에 대해 검증 데이터 로드
     stock_items = get_stock_items(settings['host'], settings['user'], settings['password'], settings['database_buy_list'])
@@ -1265,16 +1285,13 @@ def validate_model(model, buy_list_db, craw_db, settings):
     
     total_stock_items = len(stock_items)
     print(stock_items.head())
-    processed_dates = set()  # 이미 처리된 날짜를 추적하는 집합
     
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
         table_name = row.code_name
         print(f"Loading validation data for {table_name} ({idx + 1}/{total_stock_items})")
         
+        # 각 날짜별로 분석
         for validation_date in pd.date_range(start=validation_start_date, end=validation_end_date):
-            if validation_date in processed_dates:
-                continue  # 이미 처리된 날짜는 건너뜀
-            
             start_date_1200 = validation_date - timedelta(days=1200)
             df = load_daily_craw_data(craw_db, table_name, start_date_1200, validation_date)
             
@@ -1282,41 +1299,194 @@ def validate_model(model, buy_list_db, craw_db, settings):
                 print(f"Data for {table_name} loaded successfully for validation on {validation_date}")
                 print(f"Number of rows loaded for {table_name}: {len(df)}")
                 
-                # Extract features
+                # 특성 추출
                 df = extract_features(df, settings['COLUMNS_CHART_DATA'])
                 # 500봉만 잘라서 검증
                 if len(df) > 500:
                     df = df[-500:]
                 if not df.empty:    
-                    # Predict patterns - settings 인자 추가
-                    result = predict_pattern(model, df, table_name, use_data_dates=False, settings=settings)
-                    if not result.empty:
-                        # 중복된 날짜가 추가되지 않도록 수정
-                        result = result[~result['date'].isin(processed_dates)]
-                        validation_results = pd.concat([validation_results, result])
-                        processed_dates.update(result['date'])  # 처리된 날짜를 추가
-                        print("\nPattern found.")
+                    # 패턴 예측
+                    try:
+                        X = df[COLUMNS_TRAINING_DATA]
+                        X = X.replace([np.inf, -np.inf], np.nan).dropna()
+                        
+                        if not X.empty and len(X) > 0:
+                            # 마지막 봉에 대한 예측만 수행 (현재 날짜)
+                            last_candle = X.iloc[-1:]
+                            
+                            # 예측 확률 계산
+                            predictions_proba = model.predict_proba(last_candle)
+                            confidence = predictions_proba[0, 1]  # 클래스 1의 확률
+                            
+                            # 모든 종목의 예측 결과 저장
+                            all_predictions.append({
+                                'date': validation_date.date(),
+                                'stock_code': table_name,
+                                'confidence': confidence
+                            })
+                    except Exception as e:
+                        print(f"Error predicting for {table_name} on {validation_date}: {e}")
     
-    if not validation_results.empty:
+    # 예측 결과를 데이터프레임으로 변환
+    all_predictions_df = pd.DataFrame(all_predictions)
+    
+    if not all_predictions_df.empty:
+        # 날짜별로 그룹화하고 각 날짜에서 confidence가 가장 높은 상위 3개 종목 선택
+        validation_results = pd.DataFrame()
+        
+        for date, group in all_predictions_df.groupby('date'):
+            # 신뢰도 순으로 정렬하고 상위 3개 선택
+            top_stocks = group.sort_values('confidence', ascending=False).head(3)
+            validation_results = pd.concat([validation_results, top_stocks])
+        
         validation_results['date'] = pd.to_datetime(validation_results['date'])
-        validation_results = validation_results.sort_values(by='date')
-        print("\nValidation results:")
-        print(validation_results)
+        validation_results = validation_results.sort_values(by=['date', 'confidence'], ascending=[True, False])
+        
+        print("\n날짜별 상위 3개 예측 종목:")
+        for date, group in validation_results.groupby('date'):
+            print(f"\n📅 {date.strftime('%Y-%m-%d')}")
+            for i, (_, row) in enumerate(group.iterrows()):
+                print(f"  {i+1}. {row['stock_code']}: {row['confidence']:.4f}")
         
         # 검증된 종목의 개수 출력
         unique_stock_codes = validation_results['stock_code'].nunique()
-        print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
+        print(f"\n선택된 종목 수: {unique_stock_codes}")
         
-        # Validation 끝난 후 텔레그램 메시지 보내기
-        message = f"Validation completed. {validation_results}\nNumber of unique stock codes found during validation: {unique_stock_codes}"
+        # Validation 결과 텔레그램 메시지 전송
+        message = f"검증 완료. 날짜별 상위 3개 예측 종목:\n\n"
+        for date, group in validation_results.groupby('date'):
+            message += f"📅 {date.strftime('%Y-%m-%d')}\n"
+            for i, (_, row) in enumerate(group.iterrows()):
+                message += f"  {i+1}. {row['stock_code']}: {row['confidence']:.4f}\n"
+            message += "\n"
+            
         send_telegram_message(telegram_token, telegram_chat_id, message)
     else:
         print("No patterns found in the validation period")
-        # 패턴이 없으면 텔레그램 메시지 보내기
-        message = f"No patterns found in the validation period\n{results_table}\n{validation_start_date} to {validation_end_date}"
+        message = f"검증 기간 내 패턴 없음\n{results_table}\n{validation_start_date} to {validation_end_date}"
         send_telegram_message(telegram_token, telegram_chat_id, message)
     
     return validation_results
+
+
+def predict_top_stocks_by_date(model, craw_db, settings, num_stocks=3, date_range=None):
+    """
+    모든 종목에 대해 예측을 수행하고 날짜별로 예측 점수가 가장 높은 종목들을 보여줍니다.
+    
+    Args:
+        model: 훈련된 XGBoost 모델
+        craw_db: 주가 데이터 데이터베이스 연결
+        settings: 설정 사전
+        num_stocks: 날짜별 상위 종목 수 (기본값: 3)
+        date_range: 예측 날짜 범위 (시작일, 종료일) 튜플
+    """
+    if model is None:
+        print("모델이 없습니다. 먼저 모델을 훈련하세요.")
+        return pd.DataFrame()
+    
+    if date_range is None:
+        # 기본값: 최근 7일
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=7)
+    else:
+        start_date, end_date = date_range
+    
+    print(f"\n날짜별 상위 {num_stocks}개 종목 예측 ({start_date} ~ {end_date})")
+    
+    # 모든 종목 가져오기
+    stock_items = get_stock_items(settings['host'], settings['user'], settings['password'], settings['database_buy_list'])
+    
+    # 날짜별 예측 결과 저장 딕셔너리
+    predictions_by_date = {}
+    
+    # 각 종목 처리
+    total_stocks = len(stock_items)
+    for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stocks, desc="종목 분석 중"):
+        stock_code = row.code_name
+        
+        # 각 종목의 데이터 로드
+        data_start_date = start_date - timedelta(days=500)  # 특성 계산을 위한 충분한 과거 데이터
+        df = load_daily_craw_data(craw_db, stock_code, data_start_date, end_date)
+        
+        if df.empty:
+            continue
+            
+        # 특성 추출
+        df = extract_features(df, settings['COLUMNS_CHART_DATA'])
+        
+        if df.empty:
+            continue
+            
+        # 지정된 날짜 범위 내 데이터만 필터링
+        df['date'] = pd.to_datetime(df['date'])
+        df_pred = df[(df['date'] >= pd.Timestamp(start_date)) & (df['date'] <= pd.Timestamp(end_date))]
+        
+        if df_pred.empty:
+            continue
+            
+        # 예측용 데이터 준비
+        X = df_pred[settings['COLUMNS_TRAINING_DATA']]
+        X = X.replace([np.inf, -np.inf], np.nan).dropna()
+        
+        if X.empty:
+            continue
+            
+        # 예측 수행
+        try:
+            predictions_proba = model.predict_proba(X)
+            confidences = predictions_proba[:, 1]  # 클래스 1의 확률
+            
+            # 종목 코드와 신뢰도를 함께 저장
+            for i, idx in enumerate(X.index):
+                pred_date = df_pred.loc[idx, 'date'].date()
+                confidence = confidences[i]
+                
+                if pred_date not in predictions_by_date:
+                    predictions_by_date[pred_date] = []
+                    
+                predictions_by_date[pred_date].append({
+                    'date': pred_date,
+                    'stock_code': stock_code,
+                    'confidence': confidence
+                })
+        except Exception as e:
+            print(f"{stock_code} 예측 오류: {e}")
+            continue
+    
+    # 각 날짜별 예측 결과 처리
+    results = []
+    for date, predictions in sorted(predictions_by_date.items()):
+        # 신뢰도 기준 내림차순 정렬
+        sorted_predictions = sorted(predictions, key=lambda x: x['confidence'], reverse=True)
+        
+        # 상위 N개 종목 선택
+        top_stocks = sorted_predictions[:num_stocks]
+        results.extend(top_stocks)
+    
+    # 데이터프레임으로 변환
+    result_df = pd.DataFrame(results)
+    
+    if not result_df.empty:
+        # 날짜별로 그룹화
+        result_df['date'] = pd.to_datetime(result_df['date'])
+        grouped = result_df.groupby('date')
+        
+        # 날짜별 상위 종목 출력
+        print("\n날짜별 상위 예측 종목:")
+        for date, group in grouped:
+            print(f"\n📅 {date.strftime('%Y-%m-%d')}")
+            for i, (_, row) in enumerate(group.iterrows()):
+                print(f"  {i+1}. {row['stock_code']}: {row['confidence']:.4f}")
+    else:
+        print("해당 기간에 예측 결과가 없습니다.")
+    
+    return result_df
+
+# 예측 시 앙상블 결과 사용
+def ensemble_predict(models, X):
+    preds = np.array([model.predict_proba(X) for model in models])
+    avg_preds = preds.mean(axis=0)
+    return np.argmax(avg_preds, axis=1)
 
 def main():
     """메인 실행 함수"""
@@ -1331,8 +1501,8 @@ def main():
         return
     
     print("Filtered stock results loaded successfully")
-    print("Column names in filtered_results:")
-    print(filtered_results.columns.tolist())
+    # print("Column names in filtered_results:")
+    # print(filtered_results.columns.tolist())
     
     # 데이터 검증 및 열 이름 수정
     if 'signal_date' not in filtered_results.columns:
@@ -1375,12 +1545,27 @@ def main():
     # 성능 평가
     evaluate_model_performance(validation_results, buy_list_db, craw_db, settings)
 
+    # # 상위 종목 예측 기능 추가 - 최근 7일의 데이터에 대해 실행
+    # if best_model:
+    #     print("\n\n===== 날짜별 상위 예측 종목 분석 =====")
+    #     end_date = datetime.now().date()
+    #     start_date = end_date - timedelta(days=7)
+    #     top_stocks = predict_top_stocks_by_date(best_model, craw_db, settings, 
+    #                                            num_stocks=3, 
+    #                                            date_range=(start_date, end_date))
+        
+    # # 결과를 텔레그램으로 전송 (선택적)
+    # if not top_stocks.empty:
+    #     message = "날짜별 상위 예측 종목:\n\n"
+    #     for date, group in top_stocks.groupby('date'):
+    #         message += f"📅 {date.strftime('%Y-%m-%d')}\n"
+    #         for i, (_, row) in enumerate(group.iterrows()):
+    #             message += f"  {i+1}. {row['stock_code']}: {row['confidence']:.4f}\n"
+    #         message += "\n"
+        
+    #     send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
+
 
 if __name__ == '__main__':
     main()
 
-# 예측 시 앙상블 결과 사용
-def ensemble_predict(models, X):
-    preds = np.array([model.predict_proba(X) for model in models])
-    avg_preds = preds.mean(axis=0)
-    return np.argmax(avg_preds, axis=1)

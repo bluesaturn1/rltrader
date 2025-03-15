@@ -430,8 +430,8 @@ def evaluate_performance(df, start_date, end_date):
         traceback.print_exc()
         return 0.0  # 오류 발생 시 0 반환
 
-def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
-    """XGBoost 성능 결과를 deep_learning 테이블에 저장합니다."""
+def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name='xgboost'):
+    """모델 성능 결과를 deep_learning 테이블에 저장합니다."""
     try:
         # 새로운 데이터 구성
         deep_learning_data = []
@@ -439,9 +439,9 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': 'xgboost',
+                'method': model_name,  # 하드코딩된 'xgboost' 대신 인자로 받은 model_name 사용
                 'code_name': row['stock_code'],
-                'confidence': 0,  # 고정값 0
+                'confidence': row.get('confidence', 0),  # 신뢰도값이 있으면 사용, 없으면 0
                 'estimated_profit_rate': row['max_return']
             })
         
@@ -455,7 +455,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
         # 기존 데이터 삭제
         start_date = deep_learning_df['date'].min()
         end_date = deep_learning_df['date'].max()
-        delete_query = f"DELETE FROM deep_learning WHERE date >= '{start_date}' AND date <= '{end_date}' AND method = 'xgboost'"
+        delete_query = f"DELETE FROM deep_learning WHERE date >= '{start_date}' AND date <= '{end_date}' AND method = '{model_name}'"
         buy_list_db.execute_update_query(delete_query)
         
         # 새로운 데이터 삽입
@@ -466,13 +466,14 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
             """
             buy_list_db.execute_update_query(insert_query)
         
-        print(f"XGBoost 성능 결과가 deep_learning 테이블에 성공적으로 저장되었습니다. (총 {len(deep_learning_df)}개 항목)")
+        print(f"{model_name} 성능 결과가 deep_learning 테이블에 성공적으로 저장되었습니다. (총 {len(deep_learning_df)}개 항목)")
         return True
     except Exception as e:
         print(f"deep_learning 테이블 저장 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         return False
+
 
 def evaluate_model_performance(validation_results, buy_list_db, craw_db, settings):
     """검증 결과를 바탕으로 모델 성능을 평가합니다."""
@@ -541,8 +542,14 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     save_performance_to_db(performance_df, buy_list_db, performance_table)
     
     # deep_learning 테이블에도 결과 저장
-    save_xgboost_to_deep_learning_table(performance_df, buy_list_db)
-
+    if model_filename:
+        # 모델 파일 이름에서 경로와 확장자 제거하여 method 이름으로 사용
+        model_basename = os.path.basename(model_filename)
+        model_name = os.path.splitext(model_basename)[0]
+        save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name)
+    else:
+        save_xgboost_to_deep_learning_table(performance_df, buy_list_db)
+    
     # Performance 끝난 후 텔레그램 메시지 보내기
     message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}\nAverage max return: {performance_df['max_return'].mean():.2f}%"
     send_telegram_message(telegram_token, telegram_chat_id, message)
@@ -807,7 +814,7 @@ def save_model(model, accuracy, settings):
         message = "No model to save."
         send_telegram_message(telegram_token, telegram_chat_id, message)
     
-    return model_filename
+    return model_filename  # 파일 이름 반환
 
 def validate_model(model, buy_list_db, craw_db, settings):
     """학습된 모델을 검증합니다."""
@@ -897,6 +904,8 @@ def main():
     
     print("Filtered stock results loaded successfully")
     
+    # 모델 파일 이름 저장 변수
+    model_filename = None
     # 모델 로드 또는 훈련 선택
     best_model, best_accuracy, retrain = load_or_train_model(buy_list_db, craw_db, filtered_results, settings)
     
@@ -918,7 +927,7 @@ def main():
     validation_results = validate_model(best_model, buy_list_db, craw_db, settings)
     
     # 성능 평가
-    evaluate_model_performance(validation_results, buy_list_db, craw_db, settings)
+    evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename)
 
 if __name__ == '__main__':
     main()
