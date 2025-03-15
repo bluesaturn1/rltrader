@@ -1481,7 +1481,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
         
         for date, group in date_groups:
             # 각 날짜별로 Prediction 기준 상위 5개 종목 선택
-            top_stocks = group.nlargest(5, 'Prediction')
+            top_stocks = group.nlargest(3, 'Prediction')
             validation_results = pd.concat([validation_results, top_stocks], ignore_index=True)
         
         print(f"날짜별 상위 5개 종목 필터링 후 총 결과: {len(validation_results)}개")

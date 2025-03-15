@@ -1139,7 +1139,7 @@ def save_progress(progress_file, progress):
         import traceback
         traceback.print_exc()
 
-def extract_top_signals_by_date(results_df, top_n=5):
+def extract_top_signals_by_date(results_df, top_n=3):
     """날짜별로 상위 N개 매수 신호 추출"""
     if results_df.empty:
         return pd.DataFrame()
