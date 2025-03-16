@@ -695,7 +695,7 @@ def evaluate_performance(df, start_date, end_date):
         period_df = df[(df['date'] >= buy_date) & (df['date'] <= end_date)]  # and 대신 & 사용
         
         # 나머지 코드는 동일하게 유지
-        if period_df.empty 또는 len(period_df) < 2:
+        if period_df.empty or len(period_df) < 2:
             print(f"Insufficient data between {buy_date} and {end_date}")
             return 0.0
         
@@ -822,7 +822,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             })
         
         # 진행 상황 출력
-        if (index + 1) % 10 == 0 또는 (index + 1) == len(validation_results):
+        if (index + 1) % 10 == 0 or (index + 1) == len(validation_results):
             print(f"Evaluated performance for {index + 1}/{len(validation_results)} patterns")
     
     # 결과를 데이터프레임으로 변환
@@ -1093,7 +1093,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
             y = df['Label']
             
             # X 또는 y가 비어있는지 확인
-            if len(X) == 0 또는 len(y) == 0:
+            if len(X) == 0 or len(y) == 0:
                 print(f"X or y is empty for {code_name}. Skipping.")
                 continue
             
@@ -1130,7 +1130,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 y_pred = model.predict(X_test)
                 accuracy = accuracy_score(y_test, y_pred)
                 
-                if accuracy > best_accuracy 또는 best_model is None:
+                if accuracy > best_accuracy or best_model is None:
                     best_model = model
                     best_accuracy = accuracy
                     best_threshold = getattr(model, 'threshold_', 0.5)  # 최적 임계값 저장
@@ -1297,35 +1297,32 @@ def main():
     
     # 모델 파일 이름 저장 변수
     model_filename = None
+    best_threshold = 0.5  # 기본 임계값
+    
     # 모델 로드 또는 훈련 선택
     best_model, best_accuracy, retrain = load_or_train_model(buy_list_db, craw_db, filtered_results, settings)
     
     # 디버깅 로그 추가
     print(f"Main function received: best_model={best_model is not None}, best_accuracy={best_accuracy}, retrain={retrain}")
     
-    # 임계값 설정 방법 선택
-    threshold_method = input("Select threshold optimization metric (recall/f1/precision) [recall]: ").strip().lower()
-    if not threshold_method:
-        threshold_method = 'recall'  # 기본값은 재현율
-    
-    # 모델 훈련 함수에 임계값 설정 메서드 전달
+    # 모델 훈련 (필요한 경우)
     if retrain:
+        # 임계값 설정 방법 선택
+        threshold_method = input("Select threshold optimization metric (recall/f1/precision) [recall]: ").strip().lower()
+        if not threshold_method:
+            threshold_method = 'recall'  # 기본값은 재현율
+        
+        print("Retrain flag is True. Starting model training...")
         best_model, best_accuracy, best_threshold = train_models(
             buy_list_db, craw_db, filtered_results, settings, threshold_method=threshold_method
         )
-    
-    # 최적 임계값을 모델에 저장
-    if best_model and 'best_threshold' in locals():
-        best_model.threshold_ = best_threshold
-    
-    # 모델 훈련 (필요한 경우)
-    if retrain:
-        print("Retrain flag is True. Starting model training...")
-        best_model, best_accuracy = train_models(buy_list_db, craw_db, filtered_results, settings)
         
-        # 모델 저장 - retrain이 True일 때만 저장
+        # 최적 임계값을 모델에 저장
         if best_model:
-            save_model(best_model, best_accuracy, settings)
+            best_model.threshold_ = best_threshold
+            
+            # 모델 저장
+            model_filename = save_model(best_model, best_accuracy, settings)
         else:
             print("Warning: No model was returned from train_models function!")
     
