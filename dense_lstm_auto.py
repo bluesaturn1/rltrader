@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from dense_finding import get_stock_items
+from stock_utils import get_stock_items
 from tqdm import tqdm
 from telegram_utils import send_telegram_message
 from datetime import datetime, timedelta
