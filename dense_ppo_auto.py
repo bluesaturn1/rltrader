@@ -1662,7 +1662,7 @@ def filter_validation_results(results_df):
     top_signals = results_df.head(top_n)
 
     # 날짜별 상위 5개 신호 추출
-    top_signals_by_date = extract_top_signals_by_date(results_df, top_n=5)
+    top_signals_by_date = extract_top_signals_by_date(results_df, top_n=3)
     
     return {
         'high_confidence': high_confidence_results,

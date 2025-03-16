@@ -72,7 +72,11 @@ def filter_stocks(stock_items_df):
         if '리츠' in code_name:
             print(f"Skipping stock with specific name: {code_name}")
             continue
-        
+        if '스팩' in code_name:
+            print(f"Skipping stock with specific name: {code_name}")
+            continue
+
+
         filtered_stocks.append(row)
     
     return pd.DataFrame(filtered_stocks)
