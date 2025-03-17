@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from dense_finding import get_stock_items  # get_stock_items 함수를 가져옵니다.
+from stock_utils import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from dense_finding import get_stock_items
+from stock_utils import get_stock_items
 from tqdm import tqdm
 from telegram_utils import send_telegram_message
 from datetime import datetime, timedelta
@@ -1073,7 +1073,7 @@ def validate_by_date_window(model, db_manager, stock_items, validation_start_dat
     print(f"\n검증 완료: 총 {total_patterns_found}개 패턴 발견")
     return pd.DataFrame(all_results)
 
-def analyze_top_performers_by_date(performance_df, top_n=5):
+def analyze_top_performers_by_date(performance_df, top_n=3):
     """날짜별로 상위 성과를 보인 종목을 분석"""
     try:
         # 날짜별로 그룹화
@@ -1169,7 +1169,7 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     return validation_results
 
 
-def filter_top_n_per_date(validation_results, top_n_per_date=5):
+def filter_top_n_per_date(validation_results, top_n_per_date=3):
     filtered_results = []
     
     if not validation_results.empty and 'date' in validation_results.columns:
@@ -1427,14 +1427,14 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
         
         try:
             # 날짜별 상위 종목 분석
-            results, summaries = analyze_top_performers_by_date(performance_df, top_n=5)
+            results, summaries = analyze_top_performers_by_date(performance_df, top_n=3)
             
-            print("\n===== 날짜별 Prediction 값 기준 상위 5개 종목 성과 =====")
+            print("\n===== 날짜별 Prediction 값 기준 상위 3개 종목 성과 =====")
             
             for result in results:
                 date = result['date']
                 top_stocks = result['top_stocks']
-                print(f"\n날짜: {date} - Prediction 기준 상위 5개 종목")
+                print(f"\n날짜: {date} - Prediction 기준 상위 3개 종목")
                 print(top_stocks[['code_name', 'prediction', 'max_return', 'max_loss', 'risk_adjusted_return']])
                 message = f"날짜: {date}\n"
                 message += "종목명 | Prediction | 최대 수익률 | 최대 손실 | 위험 조정 수익률\n"
@@ -1481,7 +1481,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
         
         for date, group in date_groups:
             # 각 날짜별로 Prediction 기준 상위 5개 종목 선택
-            top_stocks = group.nlargest(5, 'Prediction')
+            top_stocks = group.nlargest(3, 'Prediction')
             validation_results = pd.concat([validation_results, top_stocks], ignore_index=True)
         
         print(f"날짜별 상위 5개 종목 필터링 후 총 결과: {len(validation_results)}개")

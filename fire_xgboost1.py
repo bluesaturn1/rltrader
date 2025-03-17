@@ -730,7 +730,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': model_name,
+                'method': 'fire_xgboost',
                 'code_name': row['stock_code'],
                 'confidence': round(row['confidence'], 4),  # 소수점 4자리로 반올림
                 'estimated_profit_rate': round(row['max_return'], 2)  # 소수점 2자리로 반올림
