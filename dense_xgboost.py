@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from dense_finding import get_stock_items  # get_stock_items 함수를 가져옵니다.
+from stock_utils import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
@@ -439,7 +439,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': model_name,  # 하드코딩된 'xgboost' 대신 인자로 받은 model_name 사용
+                'method': 'dense_xgboost',  # 하드코딩된 'xgboost' 대신 인자로 받은 model_name 사용
                 'code_name': row['stock_code'],
                 'confidence': row.get('confidence', 0),  # 신뢰도값이 있으면 사용, 없으면 0
                 'estimated_profit_rate': row['max_return']
@@ -474,85 +474,137 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
         traceback.print_exc()
         return False
 
-
-def evaluate_model_performance(validation_results, buy_list_db, craw_db, settings):
-    """검증 결과를 바탕으로 모델 성능을 평가합니다."""
-    if validation_results.empty:
-        print("No validation results to evaluate")
-        return
-    
-    telegram_token = settings['telegram_token']
-    telegram_chat_id = settings['telegram_chat_id']
-    performance_table = settings['performance_table']
-    results_table = settings['results_table']
-    
-    # 향후 60일 동안의 최고 수익률 검증
-    print("\nEvaluating performance for the next 60 days")
-    performance_results = []
-    
-    for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
-        code_name = row['stock_code']
-        pattern_date = row['date']
-        performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
-        performance_end_date = performance_start_date + pd.Timedelta(days=60)
+def evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename=None):
+    """
+    모델의 성능을 평가합니다. 마지막 데이터 포인트(오늘)도 결과에 포함합니다.
+    """
+    try:
+        if validation_results.empty:
+            print("No validation results to evaluate.")
+            return pd.DataFrame()
         
-        df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
-        print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
+        print(f"\nEvaluating performance for {len(validation_results)} validation results...")
         
-        # 데이터가 없는 경우에도 결과에 포함 (마지막 날짜 처리를 위함)
-        if df.empty:
-            print(f"No data available for {code_name} after {pattern_date}. Including with 0 return.")
-            performance_results.append({
-                'stock_code': code_name,
-                'pattern_date': pattern_date,
-                'start_date': performance_start_date,
-                'end_date': performance_end_date,
-                'max_return': 0.0  # 데이터가 없는 경우 0 반환
-            })
-        else:
-            max_return = evaluate_performance(df, performance_start_date, performance_end_date)
+        # 성능 평가 결과를 저장할 리스트
+        performance_results = []
+        
+        for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
+            code_name = row['stock_code']
+            pattern_date = row['date']
             
-            # None이 반환되는 경우에도 0으로 처리하여 포함
-            if max_return is None:
-                max_return = 0.0
-                print(f"No valid return found for {code_name}. Using 0 instead.")
-                
+            # 일정 기간 동안의 성능 측정
+            performance_start_date = pattern_date + pd.Timedelta(days=1)  # 패턴 다음 날부터
+            performance_end_date = pattern_date + pd.Timedelta(days=60)   # 60일 동안
+            
+            # 데이터 로드
+            df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
+            print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
+            
+            # 날짜 형식 확인 및 변환
+            if not pd.api.types.is_datetime64_any_dtype(df['date']):
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                # 변환 실패한 행 제거
+                df = df.dropna(subset=['date'])
+                print(f"Converted date column to datetime. Remaining rows: {len(df)}")
+            
+            # 중요 변경: 데이터가 비어있거나 다음 날 데이터가 없는 경우에도 결과에 포함
+            is_latest_data = False
+            max_return = 0.0
+            
+            if df.empty:
+                print(f"No data available for {code_name} after {performance_start_date}. This might be the latest pattern.")
+                is_latest_data = True
+            else:
+                # 다음날 데이터 유무 확인
+                if df[df['date'] >= performance_start_date].empty:
+                    print(f"This is the latest data available for {code_name}. Next trading day not available yet.")
+                    is_latest_data = True
+                else:
+                    # 성능 계산
+                    max_return = evaluate_performance(df, performance_start_date, performance_end_date)
+            
+            # 모든 케이스에 대해 결과 저장 (최신 데이터 여부 표시 포함)
             performance_results.append({
                 'stock_code': code_name,
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
-                'max_return': max_return
+                'max_return': round(max_return, 2),  # 소수점 2자리까지
+                'confidence': 0.5,  # 기본 신뢰도 값
+                'is_latest': is_latest_data  # 최신 데이터 여부 표시 (추가 필드)
             })
         
-        # 진행 상황 출력
-        if (index + 1) % 10 == 0 or (index + 1) == len(validation_results):
-            print(f"Evaluated performance for {index + 1}/{len(validation_results)} patterns")
-    
-    # 결과를 데이터프레임으로 변환
-    performance_df = pd.DataFrame(performance_results)
-    print("\nPerformance results:")
-    print(performance_df)
-    
-    if performance_df.empty:
-        print("No performance data generated")
-        return
-    
-    # 성능 결과를 데이터베이스에 저장
-    save_performance_to_db(performance_df, buy_list_db, performance_table)
-    
-    # deep_learning 테이블에도 결과 저장
-    if model_filename:
-        # 모델 파일 이름에서 경로와 확장자 제거하여 method 이름으로 사용
-        model_basename = os.path.basename(model_filename)
-        model_name = os.path.splitext(model_basename)[0]
-        save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name)
-    else:
-        save_xgboost_to_deep_learning_table(performance_df, buy_list_db)
-    
-    # Performance 끝난 후 텔레그램 메시지 보내기
-    message = f"Performance completed. {results_table}\nTotal performance: {len(performance_df)}\nAverage max return: {performance_df['max_return'].mean():.2f}%"
-    send_telegram_message(telegram_token, telegram_chat_id, message)
+        # 성능 결과를 데이터프레임으로 변환
+        performance_df = pd.DataFrame(performance_results)
+        
+        if not performance_df.empty:
+            # 최신 데이터와 히스토리 데이터 분리하여 보여주기
+            latest_results = performance_df[performance_df['is_latest'] == True]
+            history_results = performance_df[performance_df['is_latest'] == False]
+            
+            print("\nLatest patterns (no performance data yet):")
+            if not latest_results.empty:
+                print(latest_results[['stock_code', 'pattern_date']])
+            else:
+                print("None")
+                
+            print("\nHistorical performance results:")
+            if not history_results.empty:
+                print(history_results[['stock_code', 'pattern_date', 'max_return']])
+                
+                # 히스토리 결과에 대한 평균 수익률 계산
+                avg_return = history_results['max_return'].mean()
+                max_profit = history_results['max_return'].max()
+                min_profit = history_results['max_return'].min()
+                
+                print(f"\nAverage historical return: {avg_return:.2f}%")
+                print(f"Maximum historical return: {max_profit:.2f}%")
+                print(f"Minimum historical return: {min_profit:.2f}%")
+            else:
+                print("None")
+            
+            # 결과를 데이터베이스에 저장
+            save_performance_to_db(performance_df, buy_list_db, settings['performance_table'])
+            
+            # deep_learning 테이블에도 저장
+            save_xgboost_to_deep_learning_table(performance_df, buy_list_db, 'dense_xgboost')
+            
+            # 텔레그램으로 결과 전송
+            telegram_token = settings['telegram_token']
+            telegram_chat_id = settings['telegram_chat_id']
+            
+            # 메시지 초기화
+            message = "XGBoost performance results:\n\n"
+            
+            # 최신 패턴 먼저 표시
+            if not latest_results.empty:
+                message += "📊 LATEST PATTERNS (Today's signals):\n"
+                for _, row in latest_results.iterrows():
+                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - (Awaiting data)\n"
+                message += "\n"
+            
+            # 히스토리 결과 표시
+            if not history_results.empty:
+                message += "📈 HISTORICAL PERFORMANCE:\n"
+                # 수익률 순으로 정렬
+                sorted_history = history_results.sort_values(by='max_return', ascending=False)
+                for _, row in sorted_history.iterrows():
+                    message += f"{row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - {row['max_return']:.2f}%\n"
+                
+                message += f"\nAverage return: {avg_return:.2f}%"
+            
+            send_telegram_message(telegram_token, telegram_chat_id, message)
+            
+            return performance_df
+        else:
+            print("No performance results generated.")
+            return pd.DataFrame()
+        
+    except Exception as e:
+        print(f"Error evaluating model performance: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
 
 def save_performance_to_db(df, db_manager, table):
     try:

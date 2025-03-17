@@ -389,13 +389,26 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
 def evaluate_performance(df, start_date, end_date):
     try:
         print('Evaluating performance')
-        df['date'] = pd.to_datetime(df['date'])
+        
+        # 날짜 형식 확인 및 변환
+        if not pd.api.types.is_datetime64_any_dtype(df['date']):
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            # 변환 실패한 행 제거
+            df = df.dropna(subset=['date'])
+            print(f"Converted date column to datetime. Remaining rows: {len(df)}")
+        
+        # start_date와 end_date가 문자열인 경우 datetime으로 변환
+        if isinstance(start_date, str):
+            start_date = pd.to_datetime(start_date)
+        if isinstance(end_date, str):
+            end_date = pd.to_datetime(end_date)
         
         # 다음날 데이터가 없는 경우(오늘이 마지막 날짜인 경우) 체크
         if df[df['date'] >= start_date].empty:
             print(f"No data available from {start_date} (next trading day). Returning 0.")
             return 0.0
         
+        # 나머지 코드는 동일하게 유지...
         # 매수일(start_date)의 종가 가져오기 - 매수가격 설정
         buy_data = df[df['date'] >= start_date].iloc[0]
         buy_price = buy_data['close']
@@ -439,7 +452,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db):
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': 'xgboost',
+                'method': 'dense_xgboost',
                 'code_name': row['stock_code'],
                 'confidence': 0,  # 고정값 0
                 'estimated_profit_rate': row['max_return']
