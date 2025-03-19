@@ -475,9 +475,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
         return False
 
 def evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename=None):
-    """
-    모델의 성능을 평가합니다. 마지막 데이터 포인트(오늘)도 결과에 포함합니다.
-    """
+    """모델의 성능을 평가합니다."""
     try:
         if validation_results.empty:
             print("No validation results to evaluate.")
@@ -491,6 +489,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
         for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
             code_name = row['stock_code']
             pattern_date = row['date']
+            prediction_score = row['score']  # 예측 점수 저장
             
             # 일정 기간 동안의 성능 측정
             performance_start_date = pattern_date + pd.Timedelta(days=1)  # 패턴 다음 날부터
@@ -530,6 +529,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
                 'max_return': round(max_return, 2),  # 소수점 2자리까지
+                'prediction_score': round(prediction_score, 4),  # 예측 점수 추가
                 'confidence': 0.5,  # 기본 신뢰도 값
                 'is_latest': is_latest_data  # 최신 데이터 여부 표시 (추가 필드)
             })
@@ -550,18 +550,21 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 
             print("\nHistorical performance results:")
             if not history_results.empty:
-                print(history_results[['stock_code', 'pattern_date', 'max_return']])
+                print(history_results[['stock_code', 'pattern_date', 'prediction_score', 'max_return']])
                 
                 # 히스토리 결과에 대한 평균 수익률 계산
                 avg_return = history_results['max_return'].mean()
                 max_profit = history_results['max_return'].max()
                 min_profit = history_results['max_return'].min()
                 
+                # 상관 계수 계산
+                if 'prediction_score' in history_results.columns:
+                    corr = history_results['prediction_score'].corr(history_results['max_return'])
+                    print(f"\n예측 점수와 실제 수익률의 상관계수: {corr:.4f}")
+                
                 print(f"\nAverage historical return: {avg_return:.2f}%")
                 print(f"Maximum historical return: {max_profit:.2f}%")
                 print(f"Minimum historical return: {min_profit:.2f}%")
-            else:
-                print("None")
             
             # 결과를 데이터베이스에 저장
             save_performance_to_db(performance_df, buy_list_db, settings['performance_table'])
@@ -580,7 +583,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             if not latest_results.empty:
                 message += "📊 LATEST PATTERNS (Today's signals):\n"
                 for _, row in latest_results.iterrows():
-                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - (Awaiting data)\n"
+                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}\n"
                 message += "\n"
             
             # 히스토리 결과 표시
@@ -589,9 +592,11 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 # 수익률 순으로 정렬
                 sorted_history = history_results.sort_values(by='max_return', ascending=False)
                 for _, row in sorted_history.iterrows():
-                    message += f"{row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - {row['max_return']:.2f}%\n"
+                    message += f"{row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}, Return: {row['max_return']:.2f}%\n"
                 
                 message += f"\nAverage return: {avg_return:.2f}%"
+                if 'prediction_score' in history_results.columns:
+                    message += f"\n예측 점수와 수익률의 상관계수: {corr:.4f}"
             
             send_telegram_message(telegram_token, telegram_chat_id, message)
             
@@ -890,13 +895,15 @@ def validate_model(model, buy_list_db, craw_db, settings):
     print(stock_items.head())
     processed_dates = set()  # 이미 처리된 날짜를 추적하는 집합
     
+    # 날짜별 최고 점수 종목 저장용 딕셔너리 수정
+    date_predictions = {}  # {날짜: {종목: 점수}} - 딕셔너리 구조로 변경
+
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
         table_name = row.code_name
         print(f"Loading validation data for {table_name} ({idx + 1}/{total_stock_items})")
         
         for validation_date in pd.date_range(start=validation_start_date, end=validation_end_date):
-            if validation_date in processed_dates:
-                continue  # 이미 처리된 날짜는 건너뜀
+            # 모든 날짜를 항상 처리 (건너뛰기 없음)
             
             start_date_1200 = validation_date - timedelta(days=1200)
             df = load_daily_craw_data(craw_db, table_name, start_date_1200, validation_date)
@@ -916,36 +923,177 @@ def validate_model(model, buy_list_db, craw_db, settings):
                     if 'Volume_MA5' in last_row and last_row['Volume_MA5'] <= 50000:
                         print(f"Skipping {table_name}: 5-day average volume ({last_row['Volume_MA5']:.0f}) is below 50,000")
                         continue
-                    # Predict patterns - settings 인자 추가
-                    result = predict_pattern(model, df, table_name, use_data_dates=False, settings=settings)
+                    # predict_pattern_with_score 호출 후 처리 부분 수정
+                    result, score = predict_pattern_with_score(model, df, table_name, use_data_dates=False, settings=settings)
+                    
                     if not result.empty:
-                        # 중복된 날짜가 추가되지 않도록 수정
-                        result = result[~result['date'].isin(processed_dates)]
-                        validation_results = pd.concat([validation_results, result])
-                        processed_dates.update(result['date'])  # 처리된 날짜를 추가
-                        print("\nPattern found.")
+                        # 각 날짜에 대해 발견된 모든 패턴 및 점수 저장
+                        for _, pattern_row in result.iterrows():
+                            date = pattern_row['date']
+                            if date not in date_predictions:
+                                date_predictions[date] = {}
+                            
+                            stock = table_name
+                            score = float(pattern_row['Score'])  # 점수 추출
+                            
+                            # 이미 해당 종목이 있고 점수가 더 높으면 업데이트, 없으면 새로 추가
+                            if stock not in date_predictions[date] or score > date_predictions[date][stock]:
+                                date_predictions[date][stock] = score
+
+    # 모든 종목 처리 완료 후, 각 날짜별로 상위 3개 종목 선택 (중복 없이)
+    final_results = []
+    for date, stocks_dict in date_predictions.items():
+        if stocks_dict:  # 해당 날짜에 예측이 있는 경우
+            # 종목과 점수를 리스트로 변환하고 점수로 정렬
+            stocks_list = [(stock, score) for stock, score in stocks_dict.items()]
+            stocks_list.sort(key=lambda x: x[1], reverse=True)
+            
+            # 상위 3개 또는 가능한 최대 개수 선택
+            top_predictions = stocks_list[:min(3, len(stocks_list))]
+            
+            for i, (stock, score) in enumerate(top_predictions):
+                final_results.append({
+                    'date': date,
+                    'stock_code': stock,
+                    'score': round(score, 4),  # 소수점 넷째 자리까지 표시
+                    'rank': i + 1  # 순위 표시
+                })
+    
+    validation_results = pd.DataFrame(final_results)
     
     if not validation_results.empty:
         validation_results['date'] = pd.to_datetime(validation_results['date'])
-        validation_results = validation_results.sort_values(by='date')
-        print("\nValidation results:")
+        # 날짜별로 정렬한 후 같은 날짜 내에서는 순위로 정렬
+        validation_results = validation_results.sort_values(by=['date', 'rank'])
+        print("\nValidation results (Top 3 stocks by date):")
         print(validation_results)
+        
+        # 결과 요약 표시
+        print("\nSummary by date:")
+        for date, group in validation_results.groupby('date'):
+            print(f"\nDate: {date.strftime('%Y-%m-%d')}")
+            for _, row in group.iterrows():
+                print(f"  Rank {row['rank']}: {row['stock_code']} (Score: {row['score']:.4f})")
         
         # 검증된 종목의 개수 출력
         unique_stock_codes = validation_results['stock_code'].nunique()
         print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
         
         # Validation 끝난 후 텔레그램 메시지 보내기
-        message = f"Validation completed. {validation_results}\nNumber of unique stock codes found during validation: {unique_stock_codes}"
+        message = "Validation completed. Top 3 stocks by date:\n\n"
+        for date, group in validation_results.groupby('date'):
+            message += f"📅 {date.strftime('%Y-%m-%d')}:\n"
+            for _, row in group.iterrows():
+                message += f"  #{row['rank']} {row['stock_code']} (Score: {row['score']:.4f})\n"
+            message += "\n"
+        
+        message += f"Total unique dates: {validation_results['date'].nunique()}"
         send_telegram_message(telegram_token, telegram_chat_id, message)
     else:
-        print("No patterns found in the validation period")
-        # 패턴이 없으면 텔레그램 메시지 보내기
         message = f"No patterns found in the validation period\n{results_table}\n{validation_start_date} to {validation_end_date}"
         send_telegram_message(telegram_token, telegram_chat_id, message)
     
     return validation_results
 
+
+def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, settings=None):
+    """
+    패턴을 예측하고 예측 점수와 함께 반환합니다.
+    """
+    COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
+    
+    try:
+        print('Predicting patterns')
+        if model is None:
+            print("Model is None, cannot predict patterns.")
+            return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+            
+        X = df[COLUMNS_TRAINING_DATA]
+        X = X.replace([np.inf, -np.inf], np.nan).dropna()
+        
+        # 예측 수행
+        predictions = model.predict(X)
+        
+        # 예측 확률 계산 (점수로 사용)
+        # if hasattr(model, 'predict_proba'):
+        #     # 클래스 1, 2, 3에 대한 확률 계산 (클래스 0 제외)
+        #     prediction_probs = model.predict_proba(X)
+            
+        #     # 클래스별로 가중치 적용 (클래스 번호에 비례)
+        #     # 클래스 1: 1배, 클래스 2: 2배, 클래스 3: 3배
+        #     weighted_probs = np.zeros_like(prediction_probs[:, 1:])
+        #     for i in range(prediction_probs.shape[1] - 1):  # 클래스 0 제외
+        #         class_idx = i + 1  # 클래스 번호 (1, 2, 3)
+        #         weighted_probs[:, i] = prediction_probs[:, class_idx] * class_idx
+            
+        #     # 가중치가 적용된 확률의 합계를 점수로 사용
+        #     scores = np.sum(weighted_probs, axis=1)
+            
+        #     print(f"Using weighted scoring: class 1(x1), class 2(x2), class 3(x3)")
+        # 예측 확률 계산 (점수로 사용)
+        if hasattr(model, 'predict_proba'):
+            # 클래스 1, 2, 3에 대한 확률 합산 (클래스 0 제외)
+            prediction_probs = model.predict_proba(X)
+            # 클래스 0을 제외한 다른 클래스들(1,2,3)의 확률 합산
+            scores = np.sum(prediction_probs[:, 1:], axis=1)
+        
+        else:
+            # predict_proba가 없으면 예측값을 점수로 사용
+            scores = predictions
+
+        df = df.loc[X.index]  # 동일한 인덱스 유지
+        df['Prediction'] = predictions
+        df['Score'] = scores
+        
+        print(f'Patterns predicted: {len(predictions)} total predictions')
+        print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
+        
+        # 날짜 형식 변환
+        try:
+            if df['date'].dtype == 'object':
+                df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
+            elif not pd.api.types.is_datetime64_any_dtype(df['date']):
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            
+            df = df.dropna(subset=['date'])
+            
+            # 검증 기간 설정
+            if use_data_dates:
+                max_date = df['date'].max()
+                validation_start_date = max_date + pd.Timedelta(days=1)
+                validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
+            else:
+                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
+                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+            
+            # 검증 기간 동안의 패턴 필터링
+            recent_patterns = df[
+                (df['Prediction'] > 0) & 
+                (df['date'] >= validation_start_date) & 
+                (df['date'] <= validation_end_date)
+            ].copy()
+            
+            # 가장 높은 점수의 패턴 선택
+            if not recent_patterns.empty:
+                # 점수가 가장 높은 패턴 선택
+                best_pattern = recent_patterns.loc[recent_patterns['Score'].idxmax()]
+                best_score = best_pattern['Score']
+                
+                recent_patterns['stock_code'] = stock_code
+                result = recent_patterns[['date', 'stock_code', 'Score']]
+                
+                # 결과와 최고 점수 반환
+                return result, best_score
+            else:
+                return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+                
+        except Exception as e:
+            print(f"Error in date processing: {e}")
+            return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+            
+    except Exception as e:
+        print(f'Error predicting patterns: {e}')
+        return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
 
 def main():
     """메인 실행 함수"""

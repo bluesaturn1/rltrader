@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from dense_finding import get_stock_items  # get_stock_items 함수를 가져옵니다.
+from stock_utils import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
@@ -628,7 +628,6 @@ def setup_environment():
     
     return buy_list_db, craw_db, settings
 
-
 def load_or_train_model(buy_list_db, craw_db, filtered_results, settings):
     """사용자 입력에 따라 기존 모델을 로드하거나 새 모델을 훈련합니다."""
     model_dir = settings['model_dir']
@@ -637,8 +636,8 @@ def load_or_train_model(buy_list_db, craw_db, filtered_results, settings):
     telegram_token = settings['telegram_token']
     telegram_chat_id = settings['telegram_chat_id']
     
-    model_filename = os.path.join(model_dir, f"{results_table}_{current_date}.json")
-    print(f"Model filename: {model_filename}")
+    # 여기에 사용할 모델 파일명 직접 지정
+    specific_model_filename = "dense_results_2013_20250227_best.json"  # 원하는 모델 파일명으로 변경
     
     # 사용자에게 모델 훈련 여부 질문
     # choice = input("Do you want to retrain the model? (yes/no): ").strip().lower()
@@ -646,41 +645,33 @@ def load_or_train_model(buy_list_db, craw_db, filtered_results, settings):
     print(f"User choice: {choice}")
     
     if choice == 'no':
-        # 모델 디렉토리에서 사용 가능한 모델 파일 목록 가져오기
-        available_models = [f for f in os.listdir(model_dir) if f.endswith('.json')]
+        # 지정된 모델 파일 경로 생성
+        model_path = os.path.join(model_dir, specific_model_filename)
         
-        if not available_models:
-            print("No saved models found. Will train a new model.")
-            retrain = True
+        # 파일 존재 여부 확인
+        if os.path.exists(model_path):
+            print(f"Loading specified model: {model_path}")
+            model = xgb.XGBClassifier()
+            model.load_model(model_path)
+            return model, 0.0, False  # 로드한 모델, 정확도, retrain 여부
         else:
-            print("\nAvailable models:")
+            print(f"Specified model {specific_model_filename} not found in {model_dir}.")
+            print("Available models:")
+            available_models = [f for f in os.listdir(model_dir) if f.endswith('.json')]
             for i, model_file in enumerate(available_models):
                 print(f"{i+1}. {model_file}")
             
-            # 사용자에게 모델 선택 요청
-            while True:
-                try:
-                    # model_choice = input("\nSelect a model number (or type 'new' to train a new model): ")
-                    model_choice = '3'
-                    if model_choice.lower() == 'new':
-                        retrain = True
-                        return None, 0, True
-                    else:
-                        model_index = int(model_choice) - 1
-                        if 0 <= model_index < len(available_models):
-                            model_filename = os.path.join(model_dir, available_models[model_index])
-                            print(f"Loading model: {model_filename}")
-                            model = xgb.XGBClassifier()
-                            model.load_model(model_filename)
-                            return model, 0.0, False  # 로드한 모델, 정확도, retrain 여부
-                        else:
-                            print("Invalid model number. Please try again.")
-                except ValueError:
-                    print("Invalid input. Please enter a number or 'new'.")
+            choice = input("Model not found. Train a new model? (yes/no): ").strip().lower()
+            if choice != 'yes':
+                print("Exiting program as specified model was not found.")
+                import sys
+                sys.exit(1)
+            retrain = True
     else:
         retrain = True
     
     return None, 0, retrain
+
 
 def train_models(buy_list_db, craw_db, filtered_results, settings):
     """XGBoost 모델을 훈련합니다."""
@@ -857,6 +848,11 @@ def validate_model(model, buy_list_db, craw_db, settings):
                 df = extract_features(df, settings['COLUMNS_CHART_DATA'])
                 
                 if not df.empty:
+                    # 5봉 평균 거래량 확인 (5만 이하면 제외)
+                    last_row = df.iloc[-1]  # 가장 최근 데이터
+                    if 'Volume_MA5' in last_row and last_row['Volume_MA5'] <= 50000:
+                        print(f"Skipping {table_name}: 5-day average volume ({last_row['Volume_MA5']:.0f}) is below 50,000")
+                        continue
                     # Predict patterns - settings 인자 추가
                     result = predict_pattern(model, df, table_name, use_data_dates=False, settings=settings)
                     if not result.empty:
