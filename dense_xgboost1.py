@@ -439,7 +439,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': 'dense_xgboost',  # 하드코딩된 'xgboost' 대신 인자로 받은 model_name 사용
+                'method': 'xgboost_weighted',  # 하드코딩된 'xgboost' 대신 인자로 받은 model_name 사용
                 'code_name': row['stock_code'],
                 'confidence': row.get('confidence', 0),  # 신뢰도값이 있으면 사용, 없으면 0
                 'estimated_profit_rate': row['max_return']
@@ -530,7 +530,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 'end_date': performance_end_date,
                 'max_return': round(max_return, 2),  # 소수점 2자리까지
                 'prediction_score': round(prediction_score, 4),  # 예측 점수 추가
-                'confidence': 0.5,  # 기본 신뢰도 값
+                'confidence': round(prediction_score, 4),  # 기본 신뢰도 값
                 'is_latest': is_latest_data  # 최신 데이터 여부 표시 (추가 필드)
             })
         
@@ -579,25 +579,25 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             # 메시지 초기화
             message = "XGBoost performance results:\n\n"
             
-            # 최신 패턴 먼저 표시
-            if not latest_results.empty:
-                message += "📊 LATEST PATTERNS (Today's signals):\n"
-                for _, row in latest_results.iterrows():
-                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}\n"
-                message += "\n"
-            
             # 히스토리 결과 표시
             if not history_results.empty:
                 message += "📈 HISTORICAL PERFORMANCE:\n"
                 # 수익률 순으로 정렬
-                sorted_history = history_results.sort_values(by='max_return', ascending=False)
+                sorted_history = history_results.sort_values(by='pattern_date', ascending=True)
                 for _, row in sorted_history.iterrows():
                     message += f"{row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}, Return: {row['max_return']:.2f}%\n"
                 
                 message += f"\nAverage return: {avg_return:.2f}%"
                 if 'prediction_score' in history_results.columns:
                     message += f"\n예측 점수와 수익률의 상관계수: {corr:.4f}"
-            
+
+            # 최신 패턴 나중에 표시
+            if not latest_results.empty:
+                message += "📊 LATEST PATTERNS (Today's signals):\n"
+                for _, row in latest_results.iterrows():
+                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}\n"
+                message += "\n"
+
             send_telegram_message(telegram_token, telegram_chat_id, message)
             
             return performance_df
@@ -1015,27 +1015,27 @@ def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, sett
         predictions = model.predict(X)
         
         # 예측 확률 계산 (점수로 사용)
-        # if hasattr(model, 'predict_proba'):
-        #     # 클래스 1, 2, 3에 대한 확률 계산 (클래스 0 제외)
-        #     prediction_probs = model.predict_proba(X)
-            
-        #     # 클래스별로 가중치 적용 (클래스 번호에 비례)
-        #     # 클래스 1: 1배, 클래스 2: 2배, 클래스 3: 3배
-        #     weighted_probs = np.zeros_like(prediction_probs[:, 1:])
-        #     for i in range(prediction_probs.shape[1] - 1):  # 클래스 0 제외
-        #         class_idx = i + 1  # 클래스 번호 (1, 2, 3)
-        #         weighted_probs[:, i] = prediction_probs[:, class_idx] * class_idx
-            
-        #     # 가중치가 적용된 확률의 합계를 점수로 사용
-        #     scores = np.sum(weighted_probs, axis=1)
-            
-        #     print(f"Using weighted scoring: class 1(x1), class 2(x2), class 3(x3)")
-        # 예측 확률 계산 (점수로 사용)
         if hasattr(model, 'predict_proba'):
-            # 클래스 1, 2, 3에 대한 확률 합산 (클래스 0 제외)
+            # 클래스 1, 2, 3에 대한 확률 계산 (클래스 0 제외)
             prediction_probs = model.predict_proba(X)
-            # 클래스 0을 제외한 다른 클래스들(1,2,3)의 확률 합산
-            scores = np.sum(prediction_probs[:, 1:], axis=1)
+            
+            # 클래스별로 가중치 적용 (클래스 번호에 비례)
+            # 클래스 1: 1배, 클래스 2: 2배, 클래스 3: 3배
+            weighted_probs = np.zeros_like(prediction_probs[:, 1:])
+            for i in range(prediction_probs.shape[1] - 1):  # 클래스 0 제외
+                class_idx = i + 1  # 클래스 번호 (1, 2, 3)
+                weighted_probs[:, i] = prediction_probs[:, class_idx] * class_idx
+            
+            # 가중치가 적용된 확률의 합계를 점수로 사용
+            scores = np.sum(weighted_probs, axis=1)
+            print(f"Using weighted scoring: class 1(x1), class 2(x2), class 3(x3)")
+            
+        # 예측 확률 계산 (점수로 사용)
+        # if hasattr(model, 'predict_proba'):
+        #     # 클래스 1, 2, 3에 대한 확률 합산 (클래스 0 제외)
+        #     prediction_probs = model.predict_proba(X)
+        #     # 클래스 0을 제외한 다른 클래스들(1,2,3)의 확률 합산
+        #     scores = np.sum(prediction_probs[:, 1:], axis=1)
         
         else:
             # predict_proba가 없으면 예측값을 점수로 사용
