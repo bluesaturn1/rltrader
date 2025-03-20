@@ -873,97 +873,101 @@ def save_model(model, accuracy, settings):
     
     return model_filename  # 파일 이름 반환
 
+
 def validate_model(model, buy_list_db, craw_db, settings):
     """학습된 모델을 검증합니다."""
     telegram_token = settings['telegram_token']
     telegram_chat_id = settings['telegram_chat_id']
     results_table = settings['results_table']
-    # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
     
-    # 검증을 위해 cf.py 파일의 설정에 따라 데이터를 불러옴
+    # 검증 기간 설정
     print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
     validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
     validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
-    validation_results = pd.DataFrame()
     
     # 모든 종목에 대해 검증 데이터 로드
     stock_items = get_stock_items(settings['host'], settings['user'], settings['password'], settings['database_buy_list'])
-    print(stock_items)
-    
     total_stock_items = len(stock_items)
-    print(stock_items.head())
-    processed_dates = set()  # 이미 처리된 날짜를 추적하는 집합
+    print(f"\n전체 종목 수: {total_stock_items}")
+    print(f"검증 기간: {validation_start_date} ~ {validation_end_date}")
+    print(f"마지막 날짜({validation_end_date}) 기준으로만 예측을 수행합니다.")
     
-    # 날짜별 최고 점수 종목 저장용 딕셔너리 수정
-    date_predictions = {}  # {날짜: {종목: 점수}} - 딕셔너리 구조로 변경
-
-    for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
+    # 모든 예측 결과를 저장할 리스트
+    all_predictions = []
+    
+    # 각 종목별로 한 번만 데이터를 로드하고 처리
+    for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="종목별 검증"):
         table_name = row.code_name
-        print(f"Loading validation data for {table_name} ({idx + 1}/{total_stock_items})")
+        print(f"\nProcessing {table_name} ({idx + 1}/{total_stock_items})")
         
-        for validation_date in pd.date_range(start=validation_start_date, end=validation_end_date):
-            # 모든 날짜를 항상 처리 (건너뛰기 없음)
+        # 마지막 날짜 기준으로 1200일 전까지의 데이터를 한 번만 로드
+        start_date_1200 = validation_end_date - timedelta(days=1200)
+        df = load_daily_craw_data(craw_db, table_name, start_date_1200, validation_end_date)
+        
+        if df.empty:
+            print(f"No data found for {table_name}")
+            continue
             
-            start_date_1200 = validation_date - timedelta(days=1200)
-            df = load_daily_craw_data(craw_db, table_name, start_date_1200, validation_date)
+        print(f"Data loaded for {table_name}: {len(df)} rows")
+        
+        # 특성 추출 - 한 번만 수행
+        df_features = extract_features(df, settings['COLUMNS_CHART_DATA'])
+        if df_features.empty:
+            print(f"Failed to extract features for {table_name}")
+            continue
             
-            if not df.empty:
-                print(f"Data for {table_name} loaded successfully for validation on {validation_date}")
-                print(f"Number of rows loaded for {table_name}: {len(df)}")
-                
-                # Extract features
-                df = extract_features(df, settings['COLUMNS_CHART_DATA'])
-                # 500봉만 잘라서 검증
-                if len(df) > 500:
-                    df = df[-500:]
-                if not df.empty:
-                    # 5봉 평균 거래량 확인 (5만 이하면 제외)
-                    last_row = df.iloc[-1]  # 가장 최근 데이터
-                    if 'Volume_MA5' in last_row and last_row['Volume_MA5'] <= 50000:
-                        print(f"Skipping {table_name}: 5-day average volume ({last_row['Volume_MA5']:.0f}) is below 50,000")
-                        continue
-                    # predict_pattern_with_score 호출 후 처리 부분 수정
-                    result, score = predict_pattern_with_score(model, df, table_name, use_data_dates=False, settings=settings)
-                    
-                    if not result.empty:
-                        # 각 날짜에 대해 발견된 모든 패턴 및 점수 저장
-                        for _, pattern_row in result.iterrows():
-                            date = pattern_row['date']
-                            if date not in date_predictions:
-                                date_predictions[date] = {}
-                            
-                            stock = table_name
-                            score = float(pattern_row['Score'])  # 점수 추출
-                            
-                            # 이미 해당 종목이 있고 점수가 더 높으면 업데이트, 없으면 새로 추가
-                            if stock not in date_predictions[date] or score > date_predictions[date][stock]:
-                                date_predictions[date][stock] = score
-
-    # 모든 종목 처리 완료 후, 각 날짜별로 상위 3개 종목 선택 (중복 없이)
+        # 마지막 500봉만 사용
+        if len(df_features) > 500:
+            df_features = df_features[-500:].copy()
+            
+        # 5봉 평균 거래량 확인 (5만 이하면 제외)
+        if 'Volume_MA5' in df_features.columns:
+            last_row = df_features.iloc[-1]  # 가장 최근 데이터
+            if last_row['Volume_MA5'] <= 50000:
+                print(f"Skipping {table_name}: 5-day average volume ({last_row['Volume_MA5']:.0f}) is below 50,000")
+                continue
+        
+        # 패턴 예측 - 마지막 500봉 데이터로 한 번만 수행
+        result, score = predict_pattern_with_score(model, df_features, table_name, use_data_dates=False, settings=settings)
+        
+        if not result.empty:
+            # validation 기간에 해당하는 데이터만 필터링
+            result = result[(result['date'] >= validation_start_date) & (result['date'] <= validation_end_date)]
+            if not result.empty:
+                all_predictions.append(result)
+    
+    # 모든 결과를 데이터프레임으로 변환
+    if all_predictions:
+        all_predictions_df = pd.concat(all_predictions, ignore_index=True)
+    else:
+        all_predictions_df = pd.DataFrame(columns=['date', 'stock_code', 'Score'])
+    
+    # 날짜별 및 종목별로 분류
+    date_grouped_predictions = {}
+    
+    if not all_predictions_df.empty:
+        # 날짜별로 그룹화하고 각 날짜에서 상위 점수 종목만 선택
+        for date, group in all_predictions_df.groupby('date'):
+            top_stocks = group.nlargest(3, 'Score')  # 각 날짜별 상위 3개 선택
+            date_grouped_predictions[date] = top_stocks
+    
+    # 최종 결과 생성
     final_results = []
-    for date, stocks_dict in date_predictions.items():
-        if stocks_dict:  # 해당 날짜에 예측이 있는 경우
-            # 종목과 점수를 리스트로 변환하고 점수로 정렬
-            stocks_list = [(stock, score) for stock, score in stocks_dict.items()]
-            stocks_list.sort(key=lambda x: x[1], reverse=True)
-            
-            # 상위 3개 또는 가능한 최대 개수 선택
-            top_predictions = stocks_list[:min(3, len(stocks_list))]
-            
-            for i, (stock, score) in enumerate(top_predictions):
-                final_results.append({
-                    'date': date,
-                    'stock_code': stock,
-                    'score': round(score, 4),  # 소수점 넷째 자리까지 표시
-                    'rank': i + 1  # 순위 표시
-                })
+    for date, stocks in date_grouped_predictions.items():
+        rank = 1
+        for _, row in stocks.iterrows():
+            final_results.append({
+                'date': date,
+                'stock_code': row['stock_code'],
+                'score': round(row['Score'], 4),
+                'rank': rank
+            })
+            rank += 1
     
     validation_results = pd.DataFrame(final_results)
     
     if not validation_results.empty:
-        validation_results['date'] = pd.to_datetime(validation_results['date'])
-        # 날짜별로 정렬한 후 같은 날짜 내에서는 순위로 정렬
         validation_results = validation_results.sort_values(by=['date', 'rank'])
         print("\nValidation results (Top 3 stocks by date):")
         print(validation_results)
@@ -994,7 +998,6 @@ def validate_model(model, buy_list_db, craw_db, settings):
         send_telegram_message(telegram_token, telegram_chat_id, message)
     
     return validation_results
-
 
 def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, settings=None):
     """
