@@ -47,8 +47,8 @@ PREDICTION_VALIDATION_DAYS = 30  # 최신 데이터 이후 30일간의 예측 �
 # LSTM
 LSTM_PREDICTION_LIMIT = 0.1
 # 검증 설정
-VALIDATION_START_DATE = '20230116'  # 검증 기간 시작 날짜 설정
-VALIDATION_END_DATE = '20230131'    # 검증 기간 종료 날짜 설정
+VALIDATION_START_DATE = '20230201'  # 검증 기간 시작 날짜 설정
+VALIDATION_END_DATE = '20230228'    # 검증 기간 종료 날짜 설정
 
 # 오늘 기준 검증
 # 현재 날짜 가져오기

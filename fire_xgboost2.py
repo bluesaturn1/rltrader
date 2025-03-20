@@ -1958,6 +1958,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 checkpoint_data = {
                     'best_model': best_model,
                     'best_f1': best_f1,
+                    'best_weighted_f1': best_weighted_f1,  # 다중 클래스용 점수 저장
                     'best_threshold': best_threshold,
                     'processed_items': list(processed_items),
                     'total_models': total_models,
@@ -2037,9 +2038,10 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     print(f"총 모델 훈련: {total_models}")
     print(f"성공한 모델: {successful_models}")
     print(f"최고 F1 점수: {best_f1:.4f}")
+    print(f"Best weighted F1 score: {best_weighted_f1:.4f}")    
     
     # 훈련이 끝난 후 텔레그램 메시지 보내기
-    message = f"훈련 완료.\n총 모델 훈련: {total_models}\n성공한 모델: {successful_models}\n최고 F1 점수: {best_f1:.4f}"
+    message = f"훈련 완료.\n총 모델 훈련: {total_models}\n성공한 모델: {successful_models}\n최고 F1 점수: {best_f1:.4f}\nBest weighted F1 score: {best_weighted_f1:.4f}"
     send_telegram_message(telegram_token, telegram_chat_id, message)
     
     # 최종 체크포인트 파일 삭제 (완료 표시)
