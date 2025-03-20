@@ -964,16 +964,23 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
             print(f"Loaded parameters from {param_file}: {best_params}")
             
             # 다중 클래스 모델 초기화
+            # 기존 코드에서 수정
             model = xgb.XGBClassifier(
                 random_state=42,
-                n_estimators=best_params.get('n_estimators', 100),
-                max_depth=best_params.get('max_depth', 3),
-                learning_rate=best_params.get('learning_rate', 0.1),
-                subsample=best_params.get('subsample', 0.8),
-                colsample_bytree=best_params.get('colsample_bytree', 0.8),
-                min_child_weight=best_params.get('min_child_weight', 1),
+                n_estimators=best_params.get('n_estimators', 50),     # 100 → 50 (트리 수 감소)
+                max_depth=best_params.get('max_depth', 2),            # 3 → 2 (트리 깊이 감소)
+                learning_rate=best_params.get('learning_rate', 0.05), # 0.1 → 0.05 (학습률 감소)
+                subsample=best_params.get('subsample', 0.7),          # 0.8 → 0.7 (샘플링 비율 감소)
+                colsample_bytree=best_params.get('colsample_bytree', 0.7), # 0.8 → 0.7 (특성 샘플링 감소)
+                min_child_weight=best_params.get('min_child_weight', 3),   # 1 → 3 (과적합 방지)
+                
+                # 정규화 파라미터 추가
+                reg_alpha=best_params.get('reg_alpha', 1.0),          # L1 정규화 (새로 추가)
+                reg_lambda=best_params.get('reg_lambda', 2.0),        # L2 정규화 (새로 추가)
+                gamma=best_params.get('gamma', 0.5),                  # 분할 최소 손실 감소값 (새로 추가)
+                
                 objective='multi:softmax',
-                num_class=n_classes,  # 매핑된 클래스 수 사용
+                num_class=n_classes,
                 eval_metric='mlogloss'
             )
             # 클래스 매핑 정보 저장
@@ -1701,24 +1708,45 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     telegram_token = settings['telegram_token']
     telegram_chat_id = settings['telegram_chat_id']
     
-    # 체크포인트 로드 시도
-    checkpoint_data, checkpoint_exists = load_checkpoint_split(settings)
+    # 1. 먼저 best_model_checkpoint 로드 시도
+    best_checkpoint_data, best_checkpoint_exists = load_checkpoint_split(settings, 'best_model_checkpoint')
     
-    # 체크포인트 데이터 초기화 또는 로드
+    # 2. 기본 training_checkpoint 로드 시도
+    regular_checkpoint_data, regular_checkpoint_exists = load_checkpoint_split(settings)
+    
+    # 체크포인트 데이터 초기화 또는 로드 (최고 모델 우선)
+    if best_checkpoint_exists:
+        print("✓ 최고 성능 모델 체크포인트 발견! 이 체크포인트로 재개합니다.")
+        checkpoint_data = best_checkpoint_data
+        checkpoint_exists = True
+    elif regular_checkpoint_exists:
+        print("◎ 일반 체크포인트만 발견됨. 이 체크포인트로 재개합니다.")
+        checkpoint_data = regular_checkpoint_data
+        checkpoint_exists = True
+    else:
+        print("✗ 체크포인트를 찾을 수 없습니다. 처음부터 시작합니다.")
+        checkpoint_exists = False
+        checkpoint_data = None
+    
+    # 체크포인트에서 데이터 로드
     if checkpoint_exists:
         best_model = checkpoint_data.get('best_model')
         best_f1 = checkpoint_data.get('best_f1', 0)
-        best_weighted_f1 = checkpoint_data.get('best_weighted_f1', 0)  # 이 줄 추가
-        
+        best_weighted_f1 = checkpoint_data.get('best_weighted_f1', 0)
         best_threshold = checkpoint_data.get('best_threshold', 0.5)
         processed_items = set(checkpoint_data.get('processed_items', []))
         total_models = checkpoint_data.get('total_models', 0)
         successful_models = checkpoint_data.get('successful_models', 0)
         first_stock = checkpoint_data.get('first_stock', False)
         
-        # 처리 상황 출력
-        print(f"이전 체크포인트에서 복원: 처리된 종목 {len(processed_items)}개")
-        print(f"현재 최고 F1 점수: {best_f1:.4f}, 임계값: {best_threshold:.4f}")
+        # 디버깅 정보 출력
+        print(f"\n로드된 체크포인트 정보:")
+        print(f"  - 처리된 종목 수: {len(processed_items)}")
+        print(f"  - 최고 F1 점수: {best_f1:.4f}")
+        print(f"  - 최고 가중 F1 점수: {best_weighted_f1:.4f}")
+        print(f"  - 총 모델 수: {total_models}")
+        print(f"  - 성공 모델 수: {successful_models}")
+    
     else:
         # 첫 번째 종목에 대해서만 use_saved_params를 False로 설정
         first_stock = True
@@ -1877,6 +1905,15 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                             print(f"\n새로운 최적 다중 클래스 모델 발견 - {code_name}")
                             print(f"가중 F1 점수 (클래스 중요도 반영): {best_weighted_f1:.4f}")
                             
+                               
+                            # 최고 모델 업데이트 시 텔레그램 메시지 전송 (다중 클래스)
+                            update_message = f"🔥 새로운 최적 다중 클래스 모델 발견!\n"
+                            update_message += f"종목: {code_name}\n"
+                            update_message += f"가중 F1 점수: {best_weighted_f1:.4f}\n"
+                            update_message += f"시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            send_telegram_message(telegram_token, telegram_chat_id, update_message)
+
+
                             # 체크포인트 저장
                             checkpoint_data = {
                                 'best_model': best_model,
@@ -1931,6 +1968,18 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                             print(f"AUC-ROC: {auc_roc_str}")
                             print(f"혼동 행렬: TN={tn}, FP={fp}, FN={fn}, TP={tp}")
                             
+                            
+                            # 최고 모델 업데이트 시 텔레그램 메시지 전송 (이진 분류)
+                            update_message = f"🔥 새로운 최적 이진 분류 모델 발견!\n"
+                            update_message += f"종목: {code_name}\n"
+                            update_message += f"F1 점수: {best_f1:.4f}\n"
+                            update_message += f"임계값: {best_threshold:.4f}\n"
+                            update_message += f"정확도: {accuracy:.4f}\n"
+                            update_message += f"재현율: {recall:.4f}\n"
+                            update_message += f"시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            send_telegram_message(telegram_token, telegram_chat_id, update_message)
+
+
                             # 중간 체크포인트 저장 (최고 모델이 갱신될 때)
                             checkpoint_data = {
                                 'best_model': best_model,
@@ -2219,15 +2268,32 @@ def save_checkpoint_split(checkpoint_data, settings, checkpoint_name='training_c
     return True
 
 def load_checkpoint_split(settings, checkpoint_name='training_checkpoint'):
-    """분할 저장된 체크포인트를 로드합니다."""
+    """분할 저장된 체크포인트를 로드합니다. 자동으로 최고 모델도 확인합니다."""
     model_dir = settings['model_dir']
-    meta_path = os.path.join(model_dir, f"{checkpoint_name}_meta.pkl")
-    model_path = os.path.join(model_dir, f"{checkpoint_name}_model.json")
     
-    if not os.path.exists(meta_path):
-        print(f"체크포인트 메타데이터를 찾을 수 없습니다: {meta_path}")
+    # 최고 모델 체크포인트 경로
+    best_meta_path = os.path.join(model_dir, "best_model_checkpoint_meta.pkl")
+    best_model_path = os.path.join(model_dir, "best_model_checkpoint_model.json")
+    
+    # 일반 체크포인트 경로
+    reg_meta_path = os.path.join(model_dir, f"{checkpoint_name}_meta.pkl")
+    reg_model_path = os.path.join(model_dir, f"{checkpoint_name}_model.json")
+    
+    # 최고 모델 체크포인트가 있으면 우선 로드
+    if os.path.exists(best_meta_path) and os.path.exists(best_model_path):
+        print("최고 성능 모델 체크포인트 발견. 이 체크포인트로 재개합니다.")
+        meta_path = best_meta_path
+        model_path = best_model_path
+    # 일반 체크포인트 사용
+    elif os.path.exists(reg_meta_path):
+        print("일반 체크포인트 사용")
+        meta_path = reg_meta_path
+        model_path = reg_model_path
+    else:
+        print(f"체크포인트 메타데이터를 찾을 수 없습니다.")
         return None, False
     
+
     try:
         # 메타데이터 로드
         checkpoint_data = joblib.load(meta_path)
