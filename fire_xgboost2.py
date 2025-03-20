@@ -266,99 +266,127 @@ def load_checkpoint(settings, checkpoint_name='training_checkpoint'):
         print(f"체크포인트 로드 중 오류 발생: {e}")
         return None, False
 
-
 def advanced_time_series_augmentation(X_train, y_train, aug_ratio=4):
     """
-    TimeGAN을 사용하여 시계열 데이터 증강 - 데이터 타입 안정성 개선
+    TimeGAN을 사용하여 다중 클래스(0,1,2,3) 시계열 데이터 증강
     """
-    print("TimeGAN을 사용하여 시계열 데이터 증강 시작...")
+    print("TimeGAN을 사용하여 다중 클래스 시계열 데이터 증강 시작...")
     
-    # 클래스별 인덱스 분리
-    class0_indices = np.where(y_train == 0)[0]
-    class1_indices = np.where(y_train == 1)[0]
+    # 클래스별 인덱스 분리 및 개수 파악
+    unique_classes = np.sort(y_train.unique())
+    class_indices = {cls: np.where(y_train == cls)[0] for cls in unique_classes}
+    class_counts = {cls: len(indices) for cls, indices in class_indices.items()}
     
-    print(f"원본 클래스 분포 - 클래스 0: {len(class0_indices)}, 클래스 1: {len(class1_indices)}")
+    print(f"원본 클래스 분포:")
+    for cls in unique_classes:
+        print(f"  클래스 {cls}: {class_counts[cls]} 샘플")
+    
+    # 가장 많은 샘플이 있는 클래스 찾기
+    majority_class = max(class_counts, key=class_counts.get)
+    majority_count = class_counts[majority_class]
+    print(f"다수 클래스: 클래스 {majority_class} ({majority_count} 샘플)")
     
     # 증강이 필요한지 확인
-    if len(class1_indices) == 0:
-        print("클래스 1 샘플이 없습니다. 증강을 수행할 수 없습니다.")
+    classes_to_augment = []
+    for cls in unique_classes:
+        if cls != majority_class and class_counts[cls] > 0:  # 다수 클래스가 아니고, 샘플이 있는 클래스
+            classes_to_augment.append(cls)
+    
+    if not classes_to_augment:
+        print("증강이 필요한 클래스가 없습니다. 원본 데이터를 그대로 반환합니다.")
         return X_train, y_train
     
-    # 생성할 샘플 수 결정
-    n_to_generate = min(len(class0_indices) - len(class1_indices), 
-                       int(len(class1_indices) * aug_ratio))
+    # 원본 데이터 타입과 컬럼 정보 저장
+    original_dtypes = X_train.dtypes
+    original_columns = X_train.columns.tolist()
     
-    if n_to_generate <= 0:
-        print("증강이 필요하지 않습니다.")
-        return X_train, y_train
+    # 증강된 데이터를 저장할 리스트
+    augmented_X_list = [X_train.copy()]
+    augmented_y_list = [y_train.copy()]
     
-    # 클래스 1 데이터만 추출
-    X_class1 = X_train.iloc[class1_indices].copy()
-    
-    try:
-        # 원본 데이터 타입과 컬럼 정보 저장
-        original_dtypes = X_train.dtypes
-        original_columns = X_train.columns.tolist()
+    # 각 소수 클래스별로 증강 수행
+    for cls in classes_to_augment:
+        print(f"\n클래스 {cls} 증강 시작...")
+        cls_indices = class_indices[cls]
+        cls_count = class_counts[cls]
         
-        # TimeGAN 초기화 부분 수정 (더 작은 네트워크, 더 적은 에포크)
-        time_gan = TimeGAN(
-            seq_len=1, 
-            n_features=X_class1.shape[1],
-            latent_dim=min(5, X_class1.shape[1] // 2),  # 특성 수에 따라 잠재 차원 조정
-            batch_size=min(8, len(X_class1)),  # 배치 크기 동적 조정
-            epochs=15,  # 에포크 수 감소
-            learning_rate=0.005
-        )
-        time_gan.fit(X_class1)
+        # 생성할 샘플 수 결정 (다수 클래스와의 균형 또는 aug_ratio에 기반)
+        samples_to_generate = min(majority_count - cls_count, int(cls_count * aug_ratio))
         
-        # 합성 데이터 생성
-        synthetic_data = time_gan.sample(n_samples=n_to_generate)
+        if samples_to_generate <= 0:
+            print(f"  클래스 {cls}에 대한 증강이 필요하지 않습니다.")
+            continue
         
-        # 데이터프레임으로 변환 및 타입 보존
-        if isinstance(synthetic_data, np.ndarray):
-            # 원본 컬럼 이름 및 데이터 타입 적용
-            synthetic_df = pd.DataFrame(synthetic_data, columns=original_columns)
+        # 해당 클래스 데이터만 추출
+        X_class = X_train.iloc[cls_indices].copy()
+        
+        try:
+            # TimeGAN 모델 초기화
+            time_gan = TimeGAN(
+                seq_len=1,
+                n_features=X_class.shape[1],
+                latent_dim=min(5, X_class.shape[1] // 2),  # 특성 수에 따라 잠재 차원 조정
+                batch_size=min(8, len(X_class)),  # 배치 크기 동적 조정
+                epochs=15,  # 에포크 수
+                learning_rate=0.005
+            )
             
-            # 원본과 동일한 데이터 타입으로 변환
-            for col in original_columns:
-                synthetic_df[col] = synthetic_df[col].astype(original_dtypes[col])
+            # 모델 학습
+            print(f"  클래스 {cls}를 위한 TimeGAN 학습 중...")
+            time_gan.fit(X_class)
             
-            # 이상치 제거 (무한값, NaN)
-            synthetic_df = synthetic_df.replace([np.inf, -np.inf], np.nan).dropna()
+            # 합성 데이터 생성
+            print(f"  클래스 {cls}를 위한 {samples_to_generate}개 샘플 생성 중...")
+            synthetic_data = time_gan.sample(n_samples=samples_to_generate)
             
-            # 남은 샘플이 너무 적으면 기본 증강으로 폴백
-            if len(synthetic_df) < n_to_generate * 0.5:
-                print(f"생성된 유효 샘플이 너무 적습니다: {len(synthetic_df)}/{n_to_generate}. 기본 증강으로 대체합니다.")
-                return time_series_augmentation(X_train, y_train)
-        else:
-            synthetic_df = synthetic_data
-        
-        # 원본 데이터와 합성 데이터 결합
-        X_augmented = pd.concat([X_train, synthetic_df], ignore_index=True)
-        y_augmented = np.concatenate([y_train.values, np.ones(len(synthetic_df))])
-        
-        # 데이터 타입 일관성 확인
-        for col in original_columns:
-            X_augmented[col] = X_augmented[col].astype(original_dtypes[col])
-        
-        # 최종 증강 데이터 확인
-        X_augmented = X_augmented.replace([np.inf, -np.inf], np.nan).dropna()
-        
-        # 유효한 인덱스만 유지
-        valid_indices = ~np.isnan(X_augmented).any(axis=1)
-        X_augmented = X_augmented[valid_indices]
-        y_augmented = y_augmented[valid_indices]
-        
-        print(f"증강 후 - 샘플: {len(X_augmented)}, 클래스 1: {np.sum(y_augmented == 1)}")
-        return X_augmented, pd.Series(y_augmented)
+            # 데이터프레임으로 변환 및 타입 보존
+            if isinstance(synthetic_data, np.ndarray):
+                synthetic_df = pd.DataFrame(synthetic_data, columns=original_columns)
+                
+                # 원본과 동일한 데이터 타입으로 변환
+                for col in original_columns:
+                    synthetic_df[col] = synthetic_df[col].astype(original_dtypes[col])
+                
+                # 이상치 제거 (무한값, NaN)
+                synthetic_df = synthetic_df.replace([np.inf, -np.inf], np.nan).dropna()
+                
+                # 생성된 유효 샘플이 충분한지 확인
+                if len(synthetic_df) >= samples_to_generate * 0.5:
+                    print(f"  클래스 {cls}를 위해 {len(synthetic_df)}개의 유효 샘플 생성 완료")
+                    
+                    # 증강 리스트에 추가
+                    augmented_X_list.append(synthetic_df)
+                    augmented_y_list.append(pd.Series([cls] * len(synthetic_df)))
+                else:
+                    print(f"  경고: 생성된 유효 샘플이 너무 적습니다({len(synthetic_df)}/{samples_to_generate}).")
+            else:
+                print(f"  오류: 생성된 데이터가 예상 형식이 아닙니다.")
+                
+        except Exception as e:
+            print(f"  클래스 {cls} 증강 중 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
     
-    except Exception as e:
-        print(f"TimeGAN 증강 중 오류 발생: {e}")
-        print("기본 노이즈 기반 증강으로 대체합니다.")
-        
-        # 오류 시 기존 증강 방법으로 폴백
-        return time_series_augmentation(X_train, y_train)
-
+    # 모든 데이터 병합
+    X_augmented = pd.concat(augmented_X_list, ignore_index=True)
+    y_augmented = pd.concat(augmented_y_list, ignore_index=True)
+    
+    # 최종 증강 데이터 확인
+    X_augmented = X_augmented.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    # 유효한 인덱스만 유지
+    valid_indices = ~np.isnan(X_augmented).any(axis=1)
+    X_augmented = X_augmented[valid_indices]
+    y_augmented = y_augmented[valid_indices]
+    
+    # 최종 클래스 분포 출력
+    print("\n증강 후 클래스 분포:")
+    for cls in unique_classes:
+        count = (y_augmented == cls).sum()
+        print(f"  클래스 {cls}: {count} 샘플")
+    
+    print(f"총 샘플 수: {len(X_augmented)}")
+    return X_augmented, y_augmented
 
 def execute_update_query(self, query):
     """
@@ -500,14 +528,15 @@ def extract_features(df, COLUMNS_CHART_DATA):
         print(f'Error extracting features: {e}')
         return pd.DataFrame()
 
+# 1,2,3 라벨링
 def label_data(df, signal_dates):
     try:
         print('Labeling data')
-
+        
         df['Label'] = 0  # 기본값을 0으로 설정
         df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
-
-        # signal_dates를 올바른 형식으로 변환하고, 중복 제거
+        
+        # signal_dates를 올바른 형식으로 변환하고, 잘못된 형식의 날짜를 처리
         valid_signal_dates = []
         for date in signal_dates:
             try:
@@ -515,92 +544,133 @@ def label_data(df, signal_dates):
                 valid_signal_dates.append(valid_date)
             except ValueError:
                 print(f"Invalid date format: {date}")
-
-        # 중복 제거
-        valid_signal_dates = sorted(list(set(valid_signal_dates)))
-        print(f'Signal dates (after removing duplicates): {valid_signal_dates}')
-
+        
+        # 날짜 정렬
+        valid_signal_dates.sort()
+        print(f'Signal dates: {valid_signal_dates}')
+        
         if len(valid_signal_dates) > 0:
             # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
             date_groups = []
             current_group = [valid_signal_dates[0]]
-
+            
             for i in range(1, len(valid_signal_dates)):
-                days_diff = (valid_signal_dates[i] - valid_signal_dates[i - 1]).days
+                days_diff = (valid_signal_dates[i] - valid_signal_dates[i-1]).days
                 if days_diff >= 90:  # 3개월 이상 차이
                     date_groups.append(current_group)
                     current_group = [valid_signal_dates[i]]
                 else:
                     current_group.append(valid_signal_dates[i])
-
+            
             date_groups.append(current_group)
-
+            
             print(f"Found {len(date_groups)} separate signal groups")
-
+            
             # 각 그룹 처리
             for group_idx, group in enumerate(date_groups):
-                print(f"Processing group {group_idx + 1} with {len(group)} signals")
-
+                print(f"Processing group {group_idx+1} with {len(group)} signals")
+                
                 # 그룹의 시작과 끝 날짜
                 start_date = min(group)
                 end_date = max(group)
-
-                # 그룹 내 날짜 데이터 추출 및 정렬
-                df_group = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
-                if df_group.empty:
-                    print(f"No data found for group {group_idx + 1}")
-                    continue
-
-                # 각 시그널 날짜 처리 - 단순 이진 라벨링
-                for signal_date in group:
-                    signal_idx = df_group[df_group['date'] == signal_date].index
-                    
-                    if len(signal_idx) > 0:
-                        signal_idx = signal_idx[0]
-                        
-                        # 시그널 날짜 포함 15개 캔들에 모두 라벨 1 부여
-                        for i in range(max(0, signal_idx - 14), signal_idx + 1):
-                            if i in df_group.index:
-                                df.loc[i, 'Label'] = 1
                 
-                # 시그널 수가 2개 이상이면 시그널 사이 데이터 처리
-                if len(group) >= 2:
-                    for i in range(len(group) - 1):
-                        first_signal_date = group[i]
-                        second_signal_date = group[i + 1]
-                        
-                        # 두 시그널 사이의 데이터
-                        between_dates = df_group[(df_group['date'] > first_signal_date) & 
-                                              (df_group['date'] < second_signal_date)]
-                        
-                        # 시그널 사이가 15개 이상이면 사이의 모든 데이터에 라벨 1 부여
-                        if len(between_dates) >= 15:
-                            df.loc[between_dates.index, 'Label'] = 1
-            
-            # 최종 확인: 라벨 1이 충분하지 않은 경우 마지막 데이터 일부를 강제로 라벨링
-            if sum(df['Label'] > 0) < 15:
-                print("WARNING: Less than 15 samples with label > 0. Forcing last 15 rows for labeling.")
-                df.loc[df.tail(15).index, 'Label'] = 1
-
+                # 원래 신호 날짜들을 3등분하여 라벨 부여
+                n = len(group)
+                first_third = group[:n//3] if n > 2 else group
+                second_third = group[n//3:2*n//3] if n > 2 else []
+                last_third = group[2*n//3:] if n > 2 else []
+                
+                # 원본 신호 날짜에 라벨(1,2,3) 부여
+                signal_labels = {}
+                for date in first_third:
+                    signal_labels[date] = 1
+                for date in second_third:
+                    signal_labels[date] = 2
+                for date in last_third:
+                    signal_labels[date] = 3
+                
+                # 각 신호 날짜를 데이터프레임에 적용
+                sorted_dates = df[(df['date'] >= start_date) & (df['date'] <= end_date)]['date'].unique()
+                sorted_dates.sort()
+                
+                # 각 날짜에 대해 처리
+                current_label = 0
+                for date in sorted_dates:
+                    if date in signal_labels:
+                        # 신호 날짜인 경우 해당 라벨로 설정
+                        current_label = signal_labels[date]
+                    
+                    # 현재 라벨(이전 신호와 같은 라벨)을 적용
+                    df.loc[df['date'] == date, 'Label'] = current_label
+        
         print(f'Data labeled: {len(df)} rows')
 
         # 라벨 분포 출력
         print("Label distribution:")
         print(df['Label'].value_counts())
-
-        # 첫 5개와 마지막 15개의 라벨 출력
+        
+        # 첫 5개와 마지막 10개의 라벨 출력
         print("First 5 labels:")
-        print(df[['date', 'Label']].head(5))
-        print("Last 15 labels:")
+        print(df[['date', 'Label']].head(3))
+        print("Last 10 labels:")
         print(df[['date', 'Label']].tail(15))
 
         return df
     except Exception as e:
         print(f'Error labeling data: {e}')
         import traceback
-        traceback.print_exc()
-        return df
+        traceback.print_exc()  # 상세한 traceback 정보 출력
+        return pd.DataFrame()
 
+def multiclass_time_series_split(X, y, test_size=0.2):
+    """
+    다중 클래스(0, 1, 2, 3)가 같은 비율로 분할되도록 보장하는 시계열 분할 함수
+    """
+    indices = np.arange(len(y))
+    
+    # 각 클래스별 인덱스 찾기
+    class_indices = {}
+    unique_classes = y.unique()
+    
+    print(f"원본 클래스 분포: {y.value_counts().sort_index()}")
+    
+    for cls in unique_classes:
+        class_indices[cls] = indices[y == cls]
+        print(f"클래스 {cls}의 샘플 수: {len(class_indices[cls])}")
+    
+    # 각 클래스별 훈련/테스트 분할 인덱스 계산
+    train_indices_list = []
+    test_indices_list = []
+    
+    for cls, cls_indices in class_indices.items():
+        if len(cls_indices) > 0:
+            # 시간 순서를 유지하기 위해 인덱스 정렬
+            cls_indices = np.sort(cls_indices)
+            
+            # 분할 지점 계산
+            split_idx = int(len(cls_indices) * (1 - test_size))
+            
+            # 최소 1개는 테스트 세트에 포함
+            if split_idx == len(cls_indices) and len(cls_indices) > 0:
+                split_idx = max(0, len(cls_indices) - 1)
+                
+            # 훈련/테스트 세트로 분할
+            train_indices_list.append(cls_indices[:split_idx])
+            test_indices_list.append(cls_indices[split_idx:])
+    
+    # 각 클래스별 인덱스를 합치고 정렬
+    train_indices = np.sort(np.concatenate(train_indices_list)) if train_indices_list else np.array([])
+    test_indices = np.sort(np.concatenate(test_indices_list)) if test_indices_list else np.array([])
+    
+    # 각 세트의 클래스 분포 출력
+    print("\n분할 결과:")
+    for cls in unique_classes:
+        train_count = np.sum(y.iloc[train_indices] == cls)
+        test_count = np.sum(y.iloc[test_indices] == cls)
+        print(f"클래스 {cls}: 훈련={train_count}({train_count/(train_count+test_count)*100:.1f}%), "
+              f"테스트={test_count}({test_count/(train_count+test_count)*100:.1f}%)")
+    
+    return train_indices, test_indices
 
 def tune_xgboost_hyperparameters(X_train, y_train):
     param_grid = {
@@ -859,39 +929,41 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         y = y[X.index]
         
-        # 라벨 변환: 클래스 1, 2, 3을 모두 1(시그널 있음)으로 통합
-        y_binary = y.copy()
-        y_binary = (y_binary > 0).astype(int)  # 0은 그대로 0, 나머지는 모두 1로 변환
+        # 클래스 분포 출력
+        print("Original class distribution:")
+        print(y.value_counts().sort_index())
         
-        # print("Original class distribution:")
-        # print(y.value_counts())
-        # print("Binary class distribution:")
-        # print(y_binary.value_counts())
+        # 클래스 라벨 연속적으로 매핑 (불연속 클래스 처리)
+        unique_classes = np.sort(y.unique())
+        n_classes = len(unique_classes)
+        print(f"Original unique classes: {unique_classes}")
         
-        # 각 클래스의 인덱스 먼저 찾기
-        class0_indices = np.where(y_binary == 0)[0]
-        class1_indices = np.where(y_binary == 1)[0]
+        # 클래스 라벨이 불연속적인 경우 (예: [0, 3]만 있는 경우)
+        if len(unique_classes) > 1 and not np.array_equal(unique_classes, np.arange(len(unique_classes))):
+            print("불연속 클래스 라벨 감지. 연속적인 라벨로 매핑합니다.")
+            class_mapping = {old_cls: new_cls for new_cls, old_cls in enumerate(unique_classes)}
+            print(f"클래스 매핑: {class_mapping}")
+            y_mapped = y.map(class_mapping)
+            
+            # 매핑 결과 확인
+            print("매핑 후 클래스 분포:")
+            print(y_mapped.value_counts().sort_index())
+            
+            # 매핑된 y를 사용
+            y = y_mapped
+            n_classes = len(class_mapping)
         
-        print(f"Found {len(class0_indices)} samples of class 0")
-        print(f"Found {len(class1_indices)} samples of class 1")
-        
-        # 이진 분류를 위한 클래스 가중치 계산
-        class_weights = {0: 1, 1: 1}  # 기본 가중치
-        
-        if len(class1_indices) > 0:
-            # 불균형 비율에 따라 양성 클래스 가중치 조정
-            scale_pos_weight = len(class0_indices) / len(class1_indices)
-            print(f"Using scale_pos_weight: {scale_pos_weight}")
-        else:
-            scale_pos_weight = 1
-            print("Warning: No positive samples found. Using default scale_pos_weight=1")
+        # 기존 코드 계속...
+        for cls in unique_classes:
+            class_count = (y == cls).sum()
+            print(f"Class {cls}: {class_count} samples")
         
         # 저장된 파라미터 사용 여부
         if use_saved_params and os.path.exists(param_file):
             best_params = joblib.load(param_file)
             print(f"Loaded parameters from {param_file}: {best_params}")
             
-            # 모델 초기화
+            # 다중 클래스 모델 초기화
             model = xgb.XGBClassifier(
                 random_state=42,
                 n_estimators=best_params.get('n_estimators', 100),
@@ -900,44 +972,45 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
                 subsample=best_params.get('subsample', 0.8),
                 colsample_bytree=best_params.get('colsample_bytree', 0.8),
                 min_child_weight=best_params.get('min_child_weight', 1),
-                objective='binary:logistic',
-                eval_metric='logloss',
-                scale_pos_weight=scale_pos_weight,
-                max_delta_step=1
+                objective='multi:softmax',
+                num_class=n_classes,  # 매핑된 클래스 수 사용
+                eval_metric='mlogloss'
             )
-            print("Model loaded with saved parameters.")
+            # 클래스 매핑 정보 저장
+            model.class_mapping_ = class_mapping if 'class_mapping' in locals() else None
+            
+            print(f"모델 초기화 완료. 클래스 수: {n_classes}")
         else:
             # 새로운 파라미터로 모델 초기화
             model = xgb.XGBClassifier(
                 random_state=42,
-                objective='binary:logistic',
-                eval_metric='logloss',
-                scale_pos_weight=scale_pos_weight,
-                max_delta_step=1
+                objective='multi:softmax',  # 다중 클래스 분류로 변경
+                num_class=max(4, int(y.max()) + 1),  # 클래스 수 설정 
+                eval_metric='mlogloss'  # 다중 클래스 로그 손실
             )
-            print("Model created with default parameters.")
+            print("Model created with default parameters for multi-class classification.")
             
-        # 모델 학습 부분 수정 - 시계열 데이터에 특화된 오버샘플링 적용
-        if len(np.unique(y)) > 1:  # y_train -> y
+        # 모델 학습 부분
+        if len(np.unique(y)) > 1:
             # 클래스 분포 출력
             print("Class distribution before augmentation:")
-            print(y.value_counts())  # y_train -> y
+            print(y.value_counts().sort_index())
             
             # TimeGAN 증강 적용
             try:
                 print("Applying time series augmentation to balance training data...")
-                X_resampled, y_resampled = advanced_time_series_augmentation(X, y, aug_ratio=4)  # X_train, y_train -> X, y
-                print(f"Class distribution after augmentation: {pd.Series(y_resampled).value_counts()}")
+                X_resampled, y_resampled = advanced_time_series_augmentation(X, y, aug_ratio=4)
+                print(f"Class distribution after augmentation: {pd.Series(y_resampled).value_counts().sort_index()}")
                 
                 # 증강된 데이터로 모델 학습
                 model.fit(X_resampled, y_resampled)
             except Exception as e:
-                print(f"Augmentation failed: {e}. Using original data with class weights.")
-                # 오류 시 원본 데이터로 모델 학습 (가중치 적용)
-                model.fit(X, y)  # X_train, y_train -> X, y
+                print(f"Augmentation failed: {e}. Using original data.")
+                # 오류 시 원본 데이터로 모델 학습
+                model.fit(X, y)
         else:
             print("Only one class in training data. Using default weighting.")
-            model.fit(X, y)  # X_train, y_train -> X, y
+            model.fit(X, y)
         
         return model
         
@@ -947,85 +1020,188 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         traceback.print_exc()
         return None
 
+def is_multiclass(y_true=None, y_pred=None, model=None):
+    """
+    주어진 데이터나 모델이 다중 클래스 문제인지 확인하는 헬퍼 함수
+    """
+    if y_true is not None and len(np.unique(y_true)) > 2:
+        return True
+    if y_pred is not None and len(np.unique(y_pred)) > 2:
+        return True
+    if model is not None and hasattr(model, 'classes_') and len(model.classes_) > 2:
+        return True
+    if model is not None and hasattr(model, 'objective') and model.objective == 'multi:softmax':
+        return True
+    return False
+
+
+def safe_precision_score(y_true, y_pred, **kwargs):
+    """다중 클래스를 자동으로 처리하는 안전한 정밀도 계산 함수"""
+    # average 매개변수가 이미 지정되었는지 확인
+    if 'average' not in kwargs:
+        if is_multiclass(y_true, y_pred):
+            kwargs['average'] = 'macro'
+        else:
+            kwargs['average'] = 'binary'
+    
+    # zero_division 매개변수 처리
+    if 'zero_division' not in kwargs:
+        kwargs['zero_division'] = 1
+    
+    return precision_score(y_true, y_pred, **kwargs)
+
+def safe_recall_score(y_true, y_pred, **kwargs):
+    """다중 클래스를 자동으로 처리하는 안전한 재현율 계산 함수"""
+    # average 매개변수가 이미 지정되었는지 확인
+    if 'average' not in kwargs:
+        if is_multiclass(y_true, y_pred):
+            kwargs['average'] = 'macro'
+        else:
+            kwargs['average'] = 'binary'
+    
+    # zero_division 매개변수 처리
+    if 'zero_division' not in kwargs:
+        kwargs['zero_division'] = 1
+    
+    return recall_score(y_true, y_pred, **kwargs)
+
+def safe_f1_score(y_true, y_pred, **kwargs):
+    """다중 클래스를 자동으로 처리하는 안전한 F1 계산 함수"""
+    # average 매개변수가 이미 지정되었는지 확인
+    if 'average' not in kwargs:
+        if is_multiclass(y_true, y_pred):
+            kwargs['average'] = 'macro'
+        else:
+            kwargs['average'] = 'binary'
+    
+    # zero_division 매개변수 처리
+    if 'zero_division' not in kwargs:
+        kwargs['zero_division'] = 1
+    
+    return f1_score(y_true, y_pred, **kwargs)
+
+def optimize_multiclass_threshold(model, X_val, y_val):
+    """다중 클래스 분류를 위한 성능 평가 함수"""
+    # 기본 예측 수행
+    y_pred = model.predict(X_val)
+    
+    # 일반 성능 지표 계산
+    accuracy = accuracy_score(y_val, y_pred)
+    macro_precision = safe_precision_score(y_val, y_pred, zero_division=1)
+    macro_recall = safe_recall_score(y_val, y_pred, zero_division=1)
+    macro_f1 = safe_f1_score(y_val, y_pred, zero_division=1)
+    
+    # 클래스별 중요도를 반영한 가중 F1 점수 계산
+    weighted_f1, class_f1, weights = weighted_multiclass_f1_score(y_val, y_pred)
+    
+    print(f"\n다중 클래스 성능 평가:")
+    print(f"정확도: {accuracy:.4f}")
+    print(f"매크로 정밀도: {macro_precision:.4f}")
+    print(f"매크로 재현율: {macro_recall:.4f}")
+    print(f"매크로 F1 점수: {macro_f1:.4f}")
+    print(f"가중 F1 점수 (클래스 중요도 반영): {weighted_f1:.4f}")
+    
+    # 클래스별 F1 점수 및 가중치 출력
+    print("\n클래스별 F1 점수 및 가중치:")
+    for i, (f1, weight) in enumerate(zip(class_f1, weights)):
+        print(f"클래스 {i}: F1={f1:.4f}, 가중치={weight:.4f}")
+    
+    # 혼동 행렬 계산 및 출력
+    cm = confusion_matrix(y_val, y_pred)
+    print("\n혼동 행렬:")
+    print(cm)
+    
+    return 0.5, weighted_f1  # 다중 클래스에서는 임계값과 함께 가중 F1 점수 반환
+
+
+def weighted_multiclass_f1_score(y_true, y_pred):
+    """
+    클래스 중요도에 따라 가중치를 부여한 F1 점수 계산
+    클래스 0은 완전히 무시하고, 클래스 3 > 클래스 2 > 클래스 1 순으로 중요도 적용
+    """
+    # 각 클래스별 F1 점수 계산
+    class_f1 = f1_score(y_true, y_pred, average=None, zero_division=1)
+    
+    # 클래스별 가중치 설정 (클래스 번호에 비례)
+    weights = np.zeros(len(class_f1))  # [0, 0, 0, 0]
+    
+    # 클래스 0은 가중치 0, 나머지 클래스는 번호에 비례하는 가중치
+    for i in range(1, len(weights)):
+        weights[i] = i  # 클래스 1, 2, 3에 각각 1, 2, 3 가중치 부여
+    
+    # 클래스 0의 가중치를 완전히 0으로 설정
+    weights[0] = 0
+    
+    # 가중치 합이 0인 경우 예외 처리
+    if weights.sum() == 0:
+        print("경고: 모든 가중치가 0입니다. 유효한 클래스가 없습니다.")
+        return 0.0, class_f1, weights
+    
+    # 가중치 정규화 (합이 1이 되도록)
+    weights = weights / weights.sum()
+    
+    # 가중 평균 계산
+    weighted_f1 = np.sum(class_f1 * weights)
+    
+    return weighted_f1, class_f1, weights
 
 
 def optimize_threshold(model, X_val, y_val, metric='f1'):
     """
     F1 점수 또는 재현율을 최대화하는 최적 임계값 찾기
-    
-    Parameters:
-    - model: 학습된 분류 모델
-    - X_val: 검증 데이터
-    - y_val: 검증 라벨
-    - metric: 최적화할 지표 ('f1', 'recall', 'precision' 중 선택)
-    
-    Returns:
-    - best_threshold: 최적 임계값
     """
-    # 예측 확률 가져오기
-    y_pred_proba = model.predict_proba(X_val)[:, 1]
+    # 다중 클래스 모델 감지
+    if is_multiclass(y_val, model=model):
+        print("다중 클래스 모델 감지됨. 다중 클래스 성능 평가로 전환합니다.")
+        return optimize_multiclass_threshold(model, X_val, y_val)
     
-    # 클래스 불균형 확인
+    # 이진 분류인 경우 기존 로직 수행
+    try:
+        y_pred_proba = model.predict_proba(X_val)[:, 1]
+    except Exception as e:
+        print(f"WARNING: predict_proba failed: {e}. Using default threshold 0.5")
+        return 0.5
+    
     if len(np.unique(y_val)) < 2:
         print("WARNING: Validation set has only one class. Defaulting to threshold 0.5")
         return 0.5
 
-    best_threshold = 0.5  # 기본 임계값
+    best_threshold = 0.5
     best_score = 0
-    
-    # 다양한 임계값으로 시도
     thresholds = np.arange(0.1, 0.9, 0.05)
     results = []
     
     for threshold in thresholds:
-        # 해당 임계값으로 클래스 예측
         y_pred = (y_pred_proba >= threshold).astype(int)
         
-        # 지표 계산
+        # 안전한 점수 계산 함수 사용
         if metric == 'f1':
-            score = f1_score(y_val, y_pred)
+            score = safe_f1_score(y_val, y_pred)
         elif metric == 'recall':
-            score = recall_score(y_val, y_pred)
+            score = safe_recall_score(y_val, y_pred)
         elif metric == 'precision':
-            score = precision_score(y_val, y_pred, zero_division=0)
+            score = safe_precision_score(y_val, y_pred)
         else:
-            score = f1_score(y_val, y_pred)  # 기본값은 F1
+            score = safe_f1_score(y_val, y_pred)
             
-        # 결과 저장
         results.append({
             'threshold': threshold,
             'score': score,
-            'precision': precision_score(y_val, y_pred, zero_division=0),
-            'recall': recall_score(y_val, y_pred),
-            'f1': f1_score(y_val, y_pred)
+            'precision': safe_precision_score(y_val, y_pred),
+            'recall': safe_recall_score(y_val, y_pred),
+            'f1': safe_f1_score(y_val, y_pred)
         })
         
         if score > best_score:
             best_score = score
             best_threshold = threshold
     
-    # 결과 표시
-    results_df = pd.DataFrame(results)
-    print("\n임계값 최적화 결과:")
-    print(results_df)
-    
-    if not results_df.empty:
-        best_precision = results_df.loc[results_df['threshold'] == best_threshold, 'precision'].values
-        best_recall = results_df.loc[results_df['threshold'] == best_threshold, 'recall'].values
-        if len(best_precision) > 0 and len(best_recall) > 0:
-            best_precision = best_precision[0]
-            best_recall = best_recall[0]
-            print(f"\n최적 임계값: {best_threshold}, {metric.upper()} 점수: {best_score:.4f}")
-            print(f"이 임계값에서 - Precision: {best_precision:.4f}, Recall: {best_recall:.4f}")
-        else:
-            print("No valid precision/recall values found for the best threshold.")
-    else:
-        print("No valid threshold found. Using default threshold 0.5.")
+    # 결과 출력 부분 생략...
     
     return best_threshold
 
-
-def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
+def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
+    """패턴을 예측하고 결과를 반환합니다."""
     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
     
@@ -1034,84 +1210,117 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
         if model is None:
             print("Model is None, cannot predict patterns.")
             return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
-        X = df[COLUMNS_TRAINING_DATA]  # 지역 변수로 간결하게 사용
-     
-        # 무한대 값이나 너무 큰 값 제거
+        
+        # 1. 데이터 전처리
+        X = df[COLUMNS_TRAINING_DATA].copy()
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         
-        # 클래스 예측 - 이제 0 또는 1만 예측됨
+        if X.empty:
+            print("No valid data for prediction after preprocessing.")
+            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+        
+        # 2. 클래스 예측
         predictions = model.predict(X)
+        print(f'Total predictions: {len(predictions)}')
         
-        # 예측 확률 - 이진 분류에서는 클래스 1의 확률만 필요
-        if hasattr(model, 'predict_proba'):
-            prediction_probs = model.predict_proba(X)[:, 1]  # 클래스 1(시그널 있음)의 확률
+        # 3. 결과 데이터프레임 준비 (인덱스 동기화)
+        result_df = df.loc[X.index].copy()
+        
+        # 4. 클래스 매핑 처리 (다중 클래스 모델용)
+        if hasattr(model, 'class_mapping_') and model.class_mapping_ is not None:
+            # 역매핑 딕셔너리 생성
+            inverse_mapping = {new: old for old, new in model.class_mapping_.items()}
+            # 예측값 역매핑
+            predictions = np.array([inverse_mapping.get(p, p) for p in predictions])
+            print("클래스 라벨 역매핑 적용됨")
             
-            # 모델에 저장된 최적 임계값 사용 (없으면 기본값 0.5)
-            threshold = getattr(model, 'threshold_', 0.5)
-            print(f"Using optimal threshold: {threshold}")
+            # 예측 확률 계산
+            prediction_probs = model.predict_proba(X)
+            # 클래스별 최대 예측 확률 계산
+            max_probs = np.max(prediction_probs, axis=1)
             
-            predictions = (prediction_probs >= threshold).astype(int)
-            
-            df = df.loc[X.index]
-            df['Prediction'] = predictions
-            df['confidence'] = prediction_probs  # 시그널 확률 저장
+            # 결과에 예측 클래스와 확률 저장
+            result_df['Prediction'] = predictions
+            result_df['confidence'] = max_probs
         else:
-            df = df.loc[X.index]
-            df['Prediction'] = predictions
-            df['confidence'] = predictions
-            
-        print(f'Patterns predicted: {len(predictions)} total predictions')
-        print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
+            # 기본 이진 분류 모델 처리
+            result_df['Prediction'] = predictions
+            try:
+                probs = model.predict_proba(X)
+                result_df['confidence'] = probs[:, 1]  # 클래스 1의 확률
+            except:
+                result_df['confidence'] = 1.0  # predict_proba 실패 시 기본값
         
-        # 날짜 형식을 안전하게 변환
+        # 중요도 점수 계산
+        result_df['importance'] = result_df['Prediction'] * result_df['confidence']
+        
+        # 5. 날짜 형식 안전하게 변환 (가장 중요한 수정 부분)
         try:
-            # MySQL의 YYYYMMDD 형식 문자열을 datetime으로 변환
-            if df['date'].dtype == 'object':
-                # YYYYMMDD 형식의 문자열을 datetime으로 변환
-                df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
-            elif not pd.api.types.is_datetime64_any_dtype(df['date']):
-                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            # 날짜 열이 있는지 확인
+            if 'date' not in result_df.columns:
+                print("Warning: 'date' column not found in dataframe")
+                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            
+            # 문자열 날짜를 datetime으로 변환
+            if isinstance(result_df['date'].iloc[0], str):
+                result_df['date'] = pd.to_datetime(result_df['date'])
             
             # NaT 값 제거
-            df = df.dropna(subset=['date'])
-            print(f"Date range in data: {df['date'].min()} to {df['date'].max()}")
+            result_df = result_df.dropna(subset=['date'])
+            if result_df.empty:
+                print("No valid dates found in data.")
+                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
             
-            # 검증 기간 설정
+            print(f"Date range in data: {result_df['date'].min()} to {result_df['date'].max()}")
+            
+            # 6. 검증 기간 설정
             if use_data_dates:
                 # 훈련 모드: 데이터의 최신 날짜 이후로 예측 검증 기간 설정
-                max_date = df['date'].max()
+                max_date = result_df['date'].max()
                 validation_start_date = max_date + pd.Timedelta(days=1)
                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
             else:
-                # 예측 모드: cf.py에 설정된 검증 기간 사용 (자동 조정 없음)
+                # 예측 모드: cf.py 설정 사용
                 validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
                 validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
             
             print(f"Validation period: {validation_start_date} to {validation_end_date}")
             
-            # 검증 기간 동안의 패턴 필터링 (Prediction이 0보다 큰 경우만)
-            recent_patterns = df[
-                (df['Prediction'] > 0) & 
-                (df['date'] >= validation_start_date) & 
-                (df['date'] <= validation_end_date)
+            # 7. 패턴 필터링 - 클래스 0 제외 & 검증 기간 내
+            # 먼저 양수 예측만 필터링
+            positive_patterns = result_df[result_df['Prediction'] > 0].copy()
+            print(f'Patterns with value > 0: {len(positive_patterns)} matches found')
+            
+            if positive_patterns.empty:
+                print(f"No positive patterns found for {stock_code}")
+                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            
+            # 검증 기간 내 필터링
+            recent_patterns = positive_patterns[
+                (positive_patterns['date'] >= validation_start_date) & 
+                (positive_patterns['date'] <= validation_end_date)
             ].copy()
             
             print(f'Filtered patterns in validation period: {len(recent_patterns)}')
             
+            # 8. 최종 결과 반환
             if not recent_patterns.empty:
                 recent_patterns['stock_code'] = stock_code
-                result = recent_patterns[['date', 'stock_code', 'confidence']]  # confidence 컬럼 추가
+                final_result = recent_patterns[['date', 'stock_code', 'confidence']]
                 print(f'Found patterns for {stock_code} with confidence:')
-                print(result)
-                return result
+                print(final_result)
+                return final_result
             else:
                 print(f'No patterns found for {stock_code} in validation period')
                 return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
                 
         except Exception as e:
             print(f"Error in date processing: {e}")
-            print(f"Debug info - df['date'] sample: {df['date'].head()}")
+            print(f"Debug info - df['date'] sample: {result_df['date'].head()}")
             print(f"Debug info - validation dates: {validation_start_date}, validation_end_date: {validation_end_date}")
+            print(f"Debug info - date types: df={type(result_df['date'].iloc[0])}, start={type(validation_start_date)}")
+            import traceback
+            traceback.print_exc()
             return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
             
     except Exception as e:
@@ -1120,6 +1329,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
         import traceback
         print(f'Stack trace:\n{traceback.format_exc()}')
         return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+
 
 def evaluate_performance(df, start_date, end_date):
     try:
@@ -1498,6 +1708,8 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     if checkpoint_exists:
         best_model = checkpoint_data.get('best_model')
         best_f1 = checkpoint_data.get('best_f1', 0)
+        best_weighted_f1 = checkpoint_data.get('best_weighted_f1', 0)  # 이 줄 추가
+        
         best_threshold = checkpoint_data.get('best_threshold', 0.5)
         processed_items = set(checkpoint_data.get('processed_items', []))
         total_models = checkpoint_data.get('total_models', 0)
@@ -1512,6 +1724,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         first_stock = True
         best_model = None
         best_f1 = 0
+        best_weighted_f1 = 0 
         best_threshold = 0.5  # 기본 임계값
         total_models = 0
         successful_models = 0
@@ -1638,12 +1851,12 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     continue
                     
                 # 사용자 정의 분할 사용
-                train_indices, test_indices = custom_time_series_split(X, y, test_size=0.2)
+                train_indices, test_indices = multiclass_time_series_split(X, y, test_size=0.2)
                 X_train, X_test = X.iloc[train_indices], X.iloc[test_indices]
                 y_train, y_test = y.iloc[train_indices], y.iloc[test_indices]
-                
-                print(f"Train class distribution: {y_train.value_counts()}")
-                print(f"Test class distribution: {y_test.value_counts()}")
+
+                print(f"Train class distribution: {y_train.value_counts().sort_index()}")
+                print(f"Test class distribution: {y_test.value_counts().sort_index()}")
                 
                 # 모델 학습
                 model = train_model(X_train, y_train, use_saved_params=(not first_stock), param_file=param_file)
@@ -1653,58 +1866,82 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     # 훈련 정보 출력
                     print(f"Model trained for {code_name} from {start_date} to {end_date}")
                     
-                    # 최적의 임계값 찾기
-                    if len(np.unique(y_test)) > 1:  # 테스트 세트에 클래스 1이 있는 경우만
-                        optimal_threshold = optimize_threshold(model, X_test, y_test, metric=threshold_method)
-                        model.threshold_ = optimal_threshold
+                    # 최적의 임계값 찾기와 모델 평가 부분을 다중 클래스 여부에 따라 분기
+                    if is_multiclass(y_test, model=model):
+                        # 다중 클래스 모델 평가
+                        _, weighted_f1 = optimize_multiclass_threshold(model, X_test, y_test)
+                        
+                        if weighted_f1 > best_weighted_f1 or best_model is None:
+                            best_model = model
+                            best_weighted_f1 = weighted_f1
+                            print(f"\n새로운 최적 다중 클래스 모델 발견 - {code_name}")
+                            print(f"가중 F1 점수 (클래스 중요도 반영): {best_weighted_f1:.4f}")
+                            
+                            # 체크포인트 저장
+                            checkpoint_data = {
+                                'best_model': best_model,
+                                'best_f1': best_weighted_f1,  # 다중 클래스용 점수 저장
+                                'best_weighted_f1': best_weighted_f1,  # 다중 클래스 F1 점수 추가
+    
+                                'best_threshold': 0.5,  # 다중 클래스에서는 의미 없음
+                                'processed_items': list(processed_items),
+                                'total_models': total_models,
+                                'successful_models': successful_models,
+                                'first_stock': first_stock
+                            }
+                            save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
                     else:
-                        model.threshold_ = 0.5
-                        print("Warning: Test set has only one class. Using default threshold of 0.5")
-                    
-                    # 가장 좋은 모델을 선택하기 위해 성능 평가 - F1 점수 기준으로 변경
-                    y_pred = (model.predict_proba(X_test)[:, 1] >= model.threshold_).astype(int)
-                    f1 = f1_score(y_test, y_pred, zero_division=1)
-                    
-                    if f1 > best_f1 or best_model is None:
-                        best_model = model
-                        best_f1 = f1
-                        best_threshold = getattr(model, 'threshold_', 0.5)
-                        
-                        # 성능 지표 출력
-                        accuracy = accuracy_score(y_test, y_pred)
-                        precision = precision_score(y_test, y_pred, zero_division=1)
-                        recall = recall_score(y_test, y_pred, zero_division=1)
-                        
-                        # AUC-ROC는 클래스가 두 개 이상인 경우만 계산
-                        if len(np.unique(y_test)) > 1:
-                            auc_roc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
-                            auc_roc_str = f"{auc_roc:.4f}"
+                        # 이진 분류 모델 - 기존 코드 유지
+                        if len(np.unique(y_test)) > 1:  # 테스트 세트에 클래스 1이 있는 경우만
+                            optimal_threshold = optimize_threshold(model, X_test, y_test, metric=threshold_method)
+                            model.threshold_ = optimal_threshold
                         else:
-                            auc_roc_str = "N/A (only one class in test set)"
+                            model.threshold_ = 0.5
+                            
+                        # 가장 좋은 모델을 선택하기 위해 성능 평가 - F1 점수 기준
+                        y_pred = (model.predict_proba(X_test)[:, 1] >= model.threshold_).astype(int)
+                        f1 = safe_f1_score(y_test, y_pred, zero_division=1)
                         
-                        # 혼동 행렬 계산
-                        tn, fp, fn, tp = confusion_matrix(y_test, y_pred, labels=[0, 1]).ravel()
-                        
-                        print(f"\n새로운 최적 모델 발견 - {code_name}")
-                        print(f"최적 임계값: {best_threshold:.4f}")
-                        print(f"테스트 F1 점수: {best_f1:.4f}")  # F1 점수 출력
-                        print(f"테스트 정확도: {accuracy:.4f}")
-                        print(f"정밀도(Precision): {precision:.4f}")
-                        print(f"재현율(Recall): {recall:.4f}")
-                        print(f"AUC-ROC: {auc_roc_str}")
-                        print(f"혼동 행렬: TN={tn}, FP={fp}, FN={fn}, TP={tp}")
-                        
-                        # 중간 체크포인트 저장 (최고 모델이 갱신될 때)
-                        checkpoint_data = {
-                            'best_model': best_model,
-                            'best_f1': best_f1,  # best_accuracy 대신 best_f1 저장
-                            'best_threshold': best_threshold,
-                            'processed_items': list(processed_items),
-                            'total_models': total_models,
-                            'successful_models': successful_models,
-                            'first_stock': first_stock
-                        }
-                        save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
+                        if f1 > best_f1 or best_model is None:
+                            best_model = model
+                            best_f1 = f1
+                            best_threshold = getattr(model, 'threshold_', 0.5)
+                            
+                            # 성능 지표 출력
+                            accuracy = accuracy_score(y_test, y_pred)
+                            precision = safe_precision_score(y_test, y_pred, zero_division=1)
+                            recall = safe_recall_score(y_test, y_pred)
+                            
+                            # AUC-ROC는 클래스가 두 개 이상인 경우만 계산
+                            if len(np.unique(y_test)) > 1:
+                                auc_roc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+                                auc_roc_str = f"{auc_roc:.4f}"
+                            else:
+                                auc_roc_str = "N/A (only one class in test set)"
+                            
+                            # 혼동 행렬 계산
+                            tn, fp, fn, tp = confusion_matrix(y_test, y_pred, labels=[0, 1]).ravel()
+                            
+                            print(f"\n새로운 최적 모델 발견 - {code_name}")
+                            print(f"최적 임계값: {best_threshold:.4f}")
+                            print(f"테스트 F1 점수: {best_f1:.4f}")  # F1 점수 출력
+                            print(f"테스트 정확도: {accuracy:.4f}")
+                            print(f"정밀도(Precision): {precision:.4f}")
+                            print(f"재현율(Recall): {recall:.4f}")
+                            print(f"AUC-ROC: {auc_roc_str}")
+                            print(f"혼동 행렬: TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+                            
+                            # 중간 체크포인트 저장 (최고 모델이 갱신될 때)
+                            checkpoint_data = {
+                                'best_model': best_model,
+                                'best_f1': best_f1,  # best_accuracy 대신 best_f1 저장
+                                'best_threshold': best_threshold,
+                                'processed_items': list(processed_items),
+                                'total_models': total_models,
+                                'successful_models': successful_models,
+                                'first_stock': first_stock
+                            }
+                            save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
                     
                     successful_models += 1
                 
@@ -1777,8 +2014,13 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
             # 여기서만 텔레그램으로 진행 상황 알림 (누적된 메시지 전송)
             if item_updates:
                 progress_message = f"훈련 진행 상황: {items_processed}/{total_items} 종목 처리 완료 ({items_processed/total_items*100:.1f}%)\n"
-                progress_message += f"총 모델: {total_models}, 성공: {successful_models}, 현재 최고 F1 점수: {best_f1:.4f}\n\n"
-                
+                # 텔레그램 메시지 구성 부분 수정
+                if is_multiclass(model=best_model):
+                    # 다중 클래스 모델인 경우 가중 F1 점수 사용
+                    progress_message += f"총 모델: {total_models}, 성공: {successful_models}, 현재 최고 F1 점수(가중): {best_weighted_f1:.4f}\n\n"
+                else:
+                    # 이진 분류 모델인 경우 기존 F1 점수 사용
+                    progress_message += f"총 모델: {total_models}, 성공: {successful_models}, 현재 최고 F1 점수(이진): {best_f1:.4f}\n\n"
                 # 최대 5개의 업데이트만 포함 (메시지가 너무 길어지지 않도록)
                 if len(item_updates) > 5:
                     progress_message += "최근 업데이트:\n" + "\n".join(item_updates[-5:])
@@ -1810,7 +2052,11 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     except:
         pass
     
-    return best_model, best_f1, best_threshold
+    # 수정 코드
+    if is_multiclass(model=best_model):
+        return best_model, best_weighted_f1, 0.5  # 다중 클래스는 임계값이 의미 없음
+    else:
+        return best_model, best_f1, best_threshold
 
 def save_model(model, accuracy, settings):
     """학습된 모델을 저장합니다."""
