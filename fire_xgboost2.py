@@ -967,17 +967,17 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
             # 기존 코드에서 수정
             model = xgb.XGBClassifier(
                 random_state=42,
-                n_estimators=best_params.get('n_estimators', 50),     # 100 → 50 (트리 수 감소)
-                max_depth=best_params.get('max_depth', 2),            # 3 → 2 (트리 깊이 감소)
-                learning_rate=best_params.get('learning_rate', 0.05), # 0.1 → 0.05 (학습률 감소)
-                subsample=best_params.get('subsample', 0.7),          # 0.8 → 0.7 (샘플링 비율 감소)
-                colsample_bytree=best_params.get('colsample_bytree', 0.7), # 0.8 → 0.7 (특성 샘플링 감소)
-                min_child_weight=best_params.get('min_child_weight', 3),   # 1 → 3 (과적합 방지)
+                n_estimators=best_params.get('n_estimators', 30),     # 100 → 50 (트리 수 감소)
+                max_depth=best_params.get('max_depth', 1),            # 3 → 2 (트리 깊이 감소)
+                learning_rate=best_params.get('learning_rate', 0.01), # 0.1 → 0.05 (학습률 감소)
+                subsample=best_params.get('subsample', 0.5),          # 0.8 → 0.7 (샘플링 비율 감소)
+                colsample_bytree=best_params.get('colsample_bytree', 0.5), # 0.8 → 0.7 (특성 샘플링 감소)
+                min_child_weight=best_params.get('min_child_weight', 5),   # 1 → 3 (과적합 방지)
                 
                 # 정규화 파라미터 추가
-                reg_alpha=best_params.get('reg_alpha', 1.0),          # L1 정규화 (새로 추가)
-                reg_lambda=best_params.get('reg_lambda', 2.0),        # L2 정규화 (새로 추가)
-                gamma=best_params.get('gamma', 0.5),                  # 분할 최소 손실 감소값 (새로 추가)
+                reg_alpha=best_params.get('reg_alpha', 10.0),          # L1 정규화 (새로 추가)
+                reg_lambda=best_params.get('reg_lambda', 10.0),        # L2 정규화 (새로 추가)
+                gamma=best_params.get('gamma', 1.0),                  # 분할 최소 손실 감소값 (새로 추가)
                 
                 objective='multi:softmax',
                 num_class=n_classes,
@@ -1392,7 +1392,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
         for _, row in performance_df.iterrows():
             deep_learning_data.append({
                 'date': row['pattern_date'],
-                'method': 'fire_xgboost',
+                'method': model_name,
                 'code_name': row['stock_code'],
                 'confidence': round(row['confidence'], 4),  # 소수점 4자리로 반올림
                 'estimated_profit_rate': round(row['max_return'], 2)  # 소수점 2자리로 반올림
