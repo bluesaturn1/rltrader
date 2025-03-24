@@ -1041,57 +1041,118 @@ def is_multiclass(y_true=None, y_pred=None, model=None):
         return True
     return False
 
-
 def safe_precision_score(y_true, y_pred, **kwargs):
-    """다중 클래스를 자동으로 처리하는 안전한 정밀도 계산 함수"""
-    # average 매개변수가 이미 지정되었는지 확인
-    if 'average' not in kwargs:
-        if is_multiclass(y_true, y_pred):
-            kwargs['average'] = 'macro'
-        else:
+    """다중 클래스 문제에서 안전하게 precision을 계산하는 함수"""
+    # 존재하는 클래스 확인
+    present_labels = np.unique(np.concatenate([y_true, y_pred]))
+    
+    # 멀티클래스 판별 - 클래스가 2개 초과이거나 [0,1]이 아닌 불연속 클래스 감지
+    is_multi = len(present_labels) > 2 or not (set(present_labels) == set([0, 1]))
+    
+    # 멀티클래스인 경우 average='macro'로 설정하고 pos_label 제거
+    if is_multi:
+        kwargs['average'] = 'macro'
+        if 'pos_label' in kwargs:
+            del kwargs['pos_label']
+    else:
+        # 이진 분류인 경우 기본값 설정
+        if 'average' not in kwargs:
             kwargs['average'] = 'binary'
     
-    # zero_division 매개변수 처리
-    if 'zero_division' not in kwargs:
-        kwargs['zero_division'] = 1
+    # zero_division 항상 1로 설정
+    kwargs['zero_division'] = 1
     
-    return precision_score(y_true, y_pred, **kwargs)
+    try:
+        return precision_score(y_true, y_pred, labels=present_labels, **kwargs)
+    except ValueError as e:
+        print(f"정밀도 계산 중 오류: {e}")
+        print(f"존재하는 라벨: {present_labels}")
+        print(f"추가 정보: kwargs={kwargs}, is_multi={is_multi}")
+        
+        # 마지막 시도: 모든 특수 파라미터 제거하고 다시 시도
+        clean_kwargs = {'average': 'macro', 'zero_division': 1}
+        try:
+            return precision_score(y_true, y_pred, labels=present_labels, **clean_kwargs)
+        except Exception as e2:
+            print(f"최종 시도 실패: {e2}")
+            raise
 
 def safe_recall_score(y_true, y_pred, **kwargs):
-    """다중 클래스를 자동으로 처리하는 안전한 재현율 계산 함수"""
-    # average 매개변수가 이미 지정되었는지 확인
-    if 'average' not in kwargs:
-        if is_multiclass(y_true, y_pred):
-            kwargs['average'] = 'macro'
-        else:
+    """다중 클래스 문제에서 안전하게 recall을 계산하는 함수"""
+    present_labels = np.unique(np.concatenate([y_true, y_pred]))
+    is_multi = len(present_labels) > 2 or not (set(present_labels) == set([0, 1]))
+    
+    if is_multi:
+        kwargs['average'] = 'macro'
+        if 'pos_label' in kwargs:
+            del kwargs['pos_label']
+    else:
+        if 'average' not in kwargs:
             kwargs['average'] = 'binary'
     
-    # zero_division 매개변수 처리
-    if 'zero_division' not in kwargs:
-        kwargs['zero_division'] = 1
+    kwargs['zero_division'] = 1
     
-    return recall_score(y_true, y_pred, **kwargs)
+    try:
+        return recall_score(y_true, y_pred, labels=present_labels, **kwargs)
+    except ValueError as e:
+        print(f"재현율 계산 중 오류: {e}")
+        clean_kwargs = {'average': 'macro', 'zero_division': 1}
+        return recall_score(y_true, y_pred, labels=present_labels, **clean_kwargs)
 
 def safe_f1_score(y_true, y_pred, **kwargs):
-    """다중 클래스를 자동으로 처리하는 안전한 F1 계산 함수"""
-    # average 매개변수가 이미 지정되었는지 확인
-    if 'average' not in kwargs:
-        if is_multiclass(y_true, y_pred):
-            kwargs['average'] = 'macro'
-        else:
+    """다중 클래스 문제에서 안전하게 F1 점수를 계산하는 함수"""
+    present_labels = np.unique(np.concatenate([y_true, y_pred]))
+    is_multi = len(present_labels) > 2 or not (set(present_labels) == set([0, 1]))
+    
+    if is_multi:
+        kwargs['average'] = 'macro'
+        if 'pos_label' in kwargs:
+            del kwargs['pos_label']
+    else:
+        if 'average' not in kwargs:
             kwargs['average'] = 'binary'
     
-    # zero_division 매개변수 처리
+    kwargs['zero_division'] = 1
+    
+    try:
+        return f1_score(y_true, y_pred, labels=present_labels, **kwargs)
+    except ValueError as e:
+        print(f"F1 점수 계산 중 오류: {e}")
+        clean_kwargs = {'average': 'macro', 'zero_division': 1}
+        return f1_score(y_true, y_pred, labels=present_labels, **clean_kwargs)
+
+
+def safe_f1_score(y_true, y_pred, **kwargs):
+    """다중 클래스 문제에서 안전하게 F1 점수를 계산하는 함수"""
+    present_labels = np.unique(np.concatenate([y_true, y_pred]))
+    is_multi = len(present_labels) > 2
+    
+    if 'average' not in kwargs:
+        kwargs['average'] = 'macro' if is_multi else 'binary'
+    
     if 'zero_division' not in kwargs:
         kwargs['zero_division'] = 1
     
-    return f1_score(y_true, y_pred, **kwargs)
+    if is_multi and 'pos_label' in kwargs:
+        del kwargs['pos_label']
+    
+    try:
+        return f1_score(y_true, y_pred, labels=present_labels, **kwargs)
+    except ValueError as e:
+        print(f"F1 점수 계산 중 오류: {e}")
+        print(f"존재하는 라벨: {present_labels}")
+        raise
+
 
 def optimize_multiclass_threshold(model, X_val, y_val):
     """다중 클래스 분류를 위한 성능 평가 함수"""
     # 기본 예측 수행
     y_pred = model.predict(X_val)
     
+    # 존재하는 클래스 라벨만 사용
+    present_labels = np.unique(np.concatenate([y_val, y_pred]))
+    
+
     # 일반 성능 지표 계산
     accuracy = accuracy_score(y_val, y_pred)
     macro_precision = safe_precision_score(y_val, y_pred, zero_division=1)
@@ -1603,6 +1664,7 @@ def setup_environment():
         'telegram_chat_id': telegram_chat_id,   
         'COLUMNS_CHART_DATA': COLUMNS_CHART_DATA,
         'COLUMNS_TRAINING_DATA': COLUMNS_TRAINING_DATA,
+        'overfitting_threshold': 0.95,  # 과적합 판단 F1 점수 임계값
         'model_dir': model_dir,
         'current_date': datetime.now().strftime('%Y%m%d'),
         'param_file': 'best_params.pkl'
@@ -1896,31 +1958,58 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     
                     # 최적의 임계값 찾기와 모델 평가 부분을 다중 클래스 여부에 따라 분기
                     if is_multiclass(y_test, model=model):
-                        # 다중 클래스 모델 평가
+                        # 다중 클래스 모델 평가 부분 수정 (약 1920줄 근처)
                         _, weighted_f1 = optimize_multiclass_threshold(model, X_test, y_test)
-                        
-                        if weighted_f1 > best_weighted_f1 or best_model is None:
+
+                        # 과적합 체크 - 설정에서 임계값 가져오기
+                        overfitting_threshold = settings.get('overfitting_threshold', 0.95)
+
+                        # 과적합 감지 시 best_model 업데이트 하지 않음
+                        if weighted_f1 >= overfitting_threshold:
+                            print(f"\n⚠️ 과적합 의심 모델 감지: F1={weighted_f1:.4f} ≥ {overfitting_threshold}")
+                            print(f"이 모델은 best_model로 저장되지 않습니다.")
+                            
+                            # 텔레그램으로 과적합 알림
+                            overfit_message = (f"⚠️ 과적합 의심 모델 감지!\n"
+                                               f"종목: {code_name}\n"
+                                               f"가중 F1 점수: {weighted_f1:.4f}\n"
+                                               f"임계값: {overfitting_threshold}\n"
+                                               f"이 모델은 best_model로 저장되지 않습니다.")
+                            send_telegram_message(telegram_token, telegram_chat_id, overfit_message)
+                            
+                            # 이 모델은 best_model로 업데이트하지 않고 건너뜀
+                            # 단, 현재까지의 processed_items는 업데이트
+                            checkpoint_data = {
+                                'best_model': best_model,  # 기존 best_model 유지
+                                'best_f1': best_f1,
+                                'best_weighted_f1': best_weighted_f1,  # 기존 점수 유지
+                                'best_threshold': best_threshold,
+                                'processed_items': list(processed_items),  # 처리된 항목 업데이트
+                                'total_models': total_models,
+                                'successful_models': successful_models,
+                                'first_stock': first_stock
+                            }
+                            save_checkpoint_split(checkpoint_data, settings, 'latest_checkpoint')
+                        elif best_model is None or weighted_f1 > best_weighted_f1:
+                            # 과적합이 아니고 기존 모델보다 성능이 좋은 경우만 업데이트
                             best_model = model
                             best_weighted_f1 = weighted_f1
-                            print(f"\n새로운 최적 다중 클래스 모델 발견 - {code_name}")
-                            print(f"가중 F1 점수 (클래스 중요도 반영): {best_weighted_f1:.4f}")
                             
-                               
-                            # 최고 모델 업데이트 시 텔레그램 메시지 전송 (다중 클래스)
+                            # 최고 모델 업데이트 시 텔레그램 메시지 전송
                             update_message = f"🔥 새로운 최적 다중 클래스 모델 발견!\n"
                             update_message += f"종목: {code_name}\n"
-                            update_message += f"가중 F1 점수: {best_weighted_f1:.4f}\n"
-                            update_message += f"시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            update_message += f"가중 F1 점수: {weighted_f1:.4f}\n" 
+                            update_message += f"이전 최고 F1: {best_weighted_f1:.4f}\n"
+                            update_message += f"개선도: +{weighted_f1 - best_weighted_f1:.4f}\n"
+                            
                             send_telegram_message(telegram_token, telegram_chat_id, update_message)
-
-
-                            # 체크포인트 저장
+                            
+                            # 중간 체크포인트 저장 (과적합이 아닌 최고 모델만 저장)
                             checkpoint_data = {
                                 'best_model': best_model,
-                                'best_f1': best_weighted_f1,  # 다중 클래스용 점수 저장
-                                'best_weighted_f1': best_weighted_f1,  # 다중 클래스 F1 점수 추가
-    
-                                'best_threshold': 0.5,  # 다중 클래스에서는 의미 없음
+                                'best_f1': best_weighted_f1,
+                                'best_weighted_f1': best_weighted_f1,
+                                'best_threshold': 0.5,
                                 'processed_items': list(processed_items),
                                 'total_models': total_models,
                                 'successful_models': successful_models,
@@ -2029,7 +2118,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 import traceback
                 traceback.print_exc()
                 
-                # 오류 발생해도 체크포인트 저장
+               
                 checkpoint_data = {
                     'best_model': best_model,
                     'best_f1': best_f1,  # best_accuracy 대신 best_f1 저장
@@ -2064,6 +2153,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
             # 여기서만 텔레그램으로 진행 상황 알림 (누적된 메시지 전송)
             if item_updates:
                 progress_message = f"훈련 진행 상황: {items_processed}/{total_items} 종목 처리 완료 ({items_processed/total_items*100:.1f}%)\n"
+                progress_message += f"과적합 임계값: {settings.get('overfitting_threshold', 0.95)}\n"
                 # 텔레그램 메시지 구성 부분 수정
                 if is_multiclass(model=best_model):
                     # 다중 클래스 모델인 경우 가중 F1 점수 사용
@@ -2089,8 +2179,13 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     print(f"최고 F1 점수: {best_f1:.4f}")
     print(f"Best weighted F1 score: {best_weighted_f1:.4f}")    
     
-    # 훈련이 끝난 후 텔레그램 메시지 보내기
-    message = f"훈련 완료.\n총 모델 훈련: {total_models}\n성공한 모델: {successful_models}\n최고 F1 점수: {best_f1:.4f}\nBest weighted F1 score: {best_weighted_f1:.4f}"
+    # 약 2155줄 근처의 최종 메시지
+    message = f"훈련 완료.\n"
+    message += f"과적합 임계값: {settings.get('overfitting_threshold', 0.95)}\n"
+    message += f"총 모델 훈련: {total_models}\n"
+    message += f"성공한 모델: {successful_models}\n"
+    message += f"최고 F1 점수: {best_f1:.4f}\n"
+    message += f"Best weighted F1 score: {best_weighted_f1:.4f}"
     send_telegram_message(telegram_token, telegram_chat_id, message)
     
     # 최종 체크포인트 파일 삭제 (완료 표시)
@@ -2133,6 +2228,86 @@ def save_model(model, accuracy, settings):
     
     return model_filename  # 파일 이름 반환
 
+
+def validate_model_by_months(model, buy_list_db, craw_db, settings, 
+                           start_year=2023, start_month=1, 
+                           end_year=2023, end_month=12):
+    """검증 기간을 월별로 나누어 각 월마다 검증을 수행합니다."""
+    
+    all_validation_results = pd.DataFrame()
+    telegram_token = settings['telegram_token']
+    telegram_chat_id = settings['telegram_chat_id']
+    
+    # 각 월을 반복하며 검증
+    current_year, current_month = start_year, start_month
+    
+    while (current_year < end_year) or (current_year == end_year and current_month <= end_month):
+        # 해당 월의 시작일과 마지막일 계산
+        first_day = pd.Timestamp(year=current_year, month=current_month, day=1)
+        
+        # 다음 달 계산
+        if current_month == 12:
+            next_month_year = current_year + 1
+            next_month = 1
+        else:
+            next_month_year = current_year
+            next_month = current_month + 1
+            
+        # 해당 월의 마지막 날 계산 (다음 달의 1일 - 1일)
+        last_day = pd.Timestamp(year=next_month_year, month=next_month, day=1) - pd.Timedelta(days=1)
+        
+        # 검증 기간 설정
+        validation_start_date_str = first_day.strftime('%Y%m%d')
+        validation_end_date_str = last_day.strftime('%Y%m%d')
+        
+        print(f"\n검증 기간: {validation_start_date_str} ~ {validation_end_date_str} ({current_year}년 {current_month}월)")
+        
+        # 임시로 cf 모듈의 검증 기간 설정 변경
+        original_start = cf.VALIDATION_START_DATE
+        original_end = cf.VALIDATION_END_DATE
+        
+        cf.VALIDATION_START_DATE = validation_start_date_str
+        cf.VALIDATION_END_DATE = validation_end_date_str
+        
+        # 해당 월에 대한 검증 수행
+        month_results = validate_model(model, buy_list_db, craw_db, settings)
+        
+        # 원래 설정 복원
+        cf.VALIDATION_START_DATE = original_start
+        cf.VALIDATION_END_DATE = original_end
+        
+        # 결과 추가
+        if not month_results.empty:
+            all_validation_results = pd.concat([all_validation_results, month_results])
+            
+            # 월별 성능 요약
+            month_summary = f"{current_year}년 {current_month}월 검증 결과: {len(month_results)}개 패턴 발견"
+            print(month_summary)
+            send_telegram_message(telegram_token, telegram_chat_id, month_summary)
+        else:
+            # 결과가 없는 경우
+            print(f"{current_year}년 {current_month}월: 패턴 없음")
+        
+        # 다음 달로 이동
+        if current_month == 12:
+            current_year += 1
+            current_month = 1
+        else:
+            current_month += 1
+    
+    # 전체 결과 요약
+    if not all_validation_results.empty:
+        all_validation_results = all_validation_results.sort_values(by='date')
+        print("\n전체 검증 결과:")
+        print(f"총 {len(all_validation_results)}개 패턴, {all_validation_results['stock_code'].nunique()}개 종목")
+        
+        # 전체 결과를 텔레그램으로 알림
+        summary = f"월별 검증 완료! 총 {len(all_validation_results)}개 패턴, {all_validation_results['stock_code'].nunique()}개 종목"
+        send_telegram_message(telegram_token, telegram_chat_id, summary)
+    else:
+        print("전체 검증 기간 동안 패턴이 발견되지 않았습니다.")
+    
+    return all_validation_results
 
 def validate_model(model, buy_list_db, craw_db, settings):
     """학습된 모델을 검증합니다."""
@@ -2268,56 +2443,346 @@ def save_checkpoint_split(checkpoint_data, settings, checkpoint_name='training_c
     return True
 
 def load_checkpoint_split(settings, checkpoint_name='training_checkpoint'):
-    """분할 저장된 체크포인트를 로드합니다. 자동으로 최고 모델도 확인합니다."""
     model_dir = settings['model_dir']
     
     # 최고 모델 체크포인트 경로
     best_meta_path = os.path.join(model_dir, "best_model_checkpoint_meta.pkl")
     best_model_path = os.path.join(model_dir, "best_model_checkpoint_model.json")
     
+    # 최신 체크포인트 경로
+    latest_meta_path = os.path.join(model_dir, "latest_checkpoint_meta.pkl")
+    latest_model_path = os.path.join(model_dir, "latest_checkpoint_model.json")
+    
     # 일반 체크포인트 경로
     reg_meta_path = os.path.join(model_dir, f"{checkpoint_name}_meta.pkl")
     reg_model_path = os.path.join(model_dir, f"{checkpoint_name}_model.json")
     
-    # 최고 모델 체크포인트가 있으면 우선 로드
-    if os.path.exists(best_meta_path) and os.path.exists(best_model_path):
-        print("최고 성능 모델 체크포인트 발견. 이 체크포인트로 재개합니다.")
-        meta_path = best_meta_path
-        model_path = best_model_path
-    # 일반 체크포인트 사용
-    elif os.path.exists(reg_meta_path):
+    checkpoint_data = {}
+    have_best_model = os.path.exists(best_meta_path) and os.path.exists(best_model_path)
+    have_latest_checkpoint = os.path.exists(latest_meta_path)
+    
+    # 1. 최고 모델 로드 (모델만)
+    if have_best_model:
+        print("최고 성능 모델 발견, 최고 모델을 사용합니다.")
+        best_model_data = joblib.load(best_meta_path)
+        
+        # XGBoost 모델 명시적 로드
+        model_obj = xgb.XGBClassifier()
+        model_obj.load_model(best_model_path)
+        checkpoint_data['best_model'] = model_obj  # 실제 모델 객체
+        
+        checkpoint_data['best_f1'] = best_model_data.get('best_f1', 0)
+        checkpoint_data['best_weighted_f1'] = best_model_data.get('best_weighted_f1', 0)
+        
+        checkpoint_data['best_threshold'] = best_model_data.get('best_threshold', 0.5)
+    
+    # 2. 최신 체크포인트 로드 (처리된 종목 목록)
+    if have_latest_checkpoint:
+        print("최신 체크포인트 발견, 처리된 종목 목록을 업데이트합니다.")
+        latest_data = joblib.load(latest_meta_path)
+        checkpoint_data['processed_items'] = latest_data.get('processed_items', [])
+        checkpoint_data['total_models'] = latest_data.get('total_models', 0) 
+        checkpoint_data['successful_models'] = latest_data.get('successful_models', 0)
+        checkpoint_data['first_stock'] = latest_data.get('first_stock', False)
+    
+    # 3. 체크포인트가 있으면 반환
+    if checkpoint_data:
+        print("\n하이브리드 체크포인트 로드 완료:")
+        print(f"  - 모델 소스: {'최고 모델' if have_best_model else '없음'}")
+        print(f"  - 처리 진행 정보: {'최신 체크포인트' if have_latest_checkpoint else '없음'}")
+        return checkpoint_data, True
+    
+    # 4. 일반 체크포인트 시도
+    if os.path.exists(reg_meta_path):
         print("일반 체크포인트 사용")
-        meta_path = reg_meta_path
-        model_path = reg_model_path
+        return joblib.load(reg_meta_path), True
+    
+    # 5. 체크포인트 없음
+    print("체크포인트를 찾을 수 없습니다.")
+    return None, False
+
+def evaluate_performance_by_months(validation_results, buy_list_db, craw_db, settings, model_filename=None,
+                                  start_year=2023, start_month=1, end_year=2023, end_month=12):
+    """월별 검증 결과를 바탕으로 월별 성능을 평가합니다."""
+    
+    telegram_token = settings['telegram_token']
+    telegram_chat_id = settings['telegram_chat_id']
+    
+    if validation_results.empty:
+        message = "검증 결과가 없어 성능 평가를 진행할 수 없습니다."
+        print(message)
+        send_telegram_message(telegram_token, telegram_chat_id, message)
+        return
+    
+    # 모델 파일 이름에서 모델명 추출
+    if model_filename:
+        model_basename = os.path.basename(model_filename)
+        model_name = os.path.splitext(model_basename)[0]
     else:
-        print(f"체크포인트 메타데이터를 찾을 수 없습니다.")
+        model_name = 'xgboost'
+    
+    # 날짜를 datetime 타입으로 변환
+    validation_results['date'] = pd.to_datetime(validation_results['date'])
+    
+    # 월별 성능 결과 저장 변수
+    monthly_performance_results = []
+    all_performance_df = pd.DataFrame()
+    total_patterns = 0
+    
+    # 각 월을 반복하며 성능 평가
+    current_year, current_month = start_year, start_month
+    
+    while (current_year < end_year) or (current_year == end_year and current_month <= end_month):
+        # 해당 월의 시작일과 마지막일 계산
+        first_day = pd.Timestamp(year=current_year, month=current_month, day=1)
+        
+        # 다음 달 계산
+        if current_month == 12:
+            next_month_year = current_year + 1
+            next_month = 1
+        else:
+            next_month_year = current_year
+            next_month = current_month + 1
+            
+        # 해당 월의 마지막 날 계산 (다음 달의 1일 - 1일)
+        last_day = pd.Timestamp(year=next_month_year, month=next_month, day=1) - pd.Timedelta(days=1)
+        
+        # 해당 월의 검증 결과 필터링
+        month_validations = validation_results[
+            (validation_results['date'] >= first_day) & 
+            (validation_results['date'] <= last_day)
+        ]
+        
+        # 성능 평가 메시지
+        print(f"\n{current_year}년 {current_month}월 성능 평가 시작: {len(month_validations)}개 패턴")
+        
+        if not month_validations.empty:
+            # 해당 월에 대한 성능 평가
+            performance_results = []
+            
+            for index, row in tqdm(month_validations.iterrows(), total=len(month_validations), 
+                                  desc=f"{current_year}-{current_month} 성능 평가"):
+                code_name = row['stock_code']
+                pattern_date = row['date']
+                confidence = row.get('confidence', 0)
+                performance_start_date = pattern_date + pd.Timedelta(days=1)
+                performance_end_date = performance_start_date + pd.Timedelta(days=60)
+                
+                df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
+                
+                # 데이터가 없는 경우에도 결과에 포함
+                if df.empty:
+                    print(f"No data available for {code_name} after {pattern_date}. Including with 0 return.")
+                    performance_results.append({
+                        'stock_code': code_name,
+                        'pattern_date': pattern_date,
+                        'start_date': performance_start_date,
+                        'end_date': performance_end_date,
+                        'max_return': 0.0,
+                        'confidence': confidence,
+                        'month': f"{current_year}-{current_month:02d}"
+                    })
+                else:
+                    max_return = evaluate_performance(df, performance_start_date, performance_end_date)
+                    
+                    # None이 반환되는 경우 0으로 처리
+                    if max_return is None:
+                        max_return = 0.0
+                        
+                    performance_results.append({
+                        'stock_code': code_name,
+                        'pattern_date': pattern_date,
+                        'start_date': performance_start_date,
+                        'end_date': performance_end_date,
+                        'max_return': round(max_return, 2),
+                        'confidence': round(confidence, 4),
+                        'month': f"{current_year}-{current_month:02d}"
+                    })
+            
+            # 결과를 데이터프레임으로 변환
+            month_performance_df = pd.DataFrame(performance_results)
+            
+            if not month_performance_df.empty:
+                # 월별 성능 통계
+                total_patterns += len(month_performance_df)
+                month_avg_return = month_performance_df['max_return'].mean()
+                month_max_return = month_performance_df['max_return'].max()
+                month_min_return = month_performance_df['max_return'].min()
+                
+                # 월별 성능 요약 메시지
+                month_summary = {
+                    'year': current_year,
+                    'month': current_month,
+                    'patterns': len(month_performance_df),
+                    'stocks': month_performance_df['stock_code'].nunique(),
+                    'avg_return': round(month_avg_return, 2),
+                    'max_return': round(month_max_return, 2),
+                    'min_return': round(month_min_return, 2)
+                }
+                monthly_performance_results.append(month_summary)
+                
+                # 텔레그램으로 월별 성능 알림
+                month_message = (f"📊 {current_year}년 {current_month}월 성능 평가 결과:\n"
+                                f"패턴 수: {len(month_performance_df)}개\n"
+                                f"종목 수: {month_performance_df['stock_code'].nunique()}개\n"
+                                f"평균 수익률: {month_avg_return:.2f}%\n"
+                                f"최대 수익률: {month_max_return:.2f}%\n"
+                                f"최소 수익률: {month_min_return:.2f}%")
+                
+                send_telegram_message(telegram_token, telegram_chat_id, month_message)
+                
+                # 데이터베이스에 월별 성능 저장
+                month_performance_df['month'] = f"{current_year}-{current_month:02d}"
+                all_performance_df = pd.concat([all_performance_df, month_performance_df])
+                
+                # deep_learning 테이블에 월별 결과 저장
+                monthly_model_name = f"{model_name}_{current_year}{current_month:02d}"
+                save_xgboost_to_deep_learning_table(month_performance_df, buy_list_db, monthly_model_name)
+            else:
+                print(f"{current_year}년 {current_month}월: 성능 데이터 없음")
+        else:
+            print(f"{current_year}년 {current_month}월: 검증 결과 없음")
+        
+        # 다음 달로 이동
+        if current_month == 12:
+            current_year += 1
+            current_month = 1
+        else:
+            current_month += 1
+    
+    # 전체 결과 요약
+    if not all_performance_df.empty:
+        # 전체 통계 계산
+        total_stocks = all_performance_df['stock_code'].nunique()
+        total_months = len(monthly_performance_results)
+        overall_avg_return = all_performance_df['max_return'].mean()
+        overall_max_return = all_performance_df['max_return'].max()
+        overall_min_return = all_performance_df['max_return'].min()
+        
+        # 월별 성능 표 생성
+        monthly_summary_df = pd.DataFrame(monthly_performance_results)
+        monthly_summary_str = monthly_summary_df.to_string(index=False)
+        
+        # 전체 결과 메시지
+        overall_message = (f"🔍 전체 성능 평가 결과 ({start_year}/{start_month} ~ {end_year}/{end_month}):\n"
+                          f"총 패턴 수: {total_patterns}개\n"
+                          f"총 종목 수: {total_stocks}개\n"
+                          f"분석 월 수: {total_months}개월\n"
+                          f"전체 평균 수익률: {overall_avg_return:.2f}%\n"
+                          f"전체 최대 수익률: {overall_max_return:.2f}%\n"
+                          f"전체 최소 수익률: {overall_min_return:.2f}%\n\n"
+                          f"월별 성능 요약:\n{monthly_summary_str}")
+        
+        # 메시지가 너무 길면 분할하여 전송
+        if len(overall_message) > 4000:
+            # 기본 정보 먼저 전송
+            basic_info = (f"🔍 전체 성능 평가 결과 ({start_year}/{start_month} ~ {end_year}/{end_month}):\n"
+                         f"총 패턴 수: {total_patterns}개\n"
+                         f"총 종목 수: {total_stocks}개\n"
+                         f"분석 월 수: {total_months}개월\n"
+                         f"전체 평균 수익률: {overall_avg_return:.2f}%\n"
+                         f"전체 최대 수익률: {overall_max_return:.2f}%\n"
+                         f"전체 최소 수익률: {overall_min_return:.2f}%")
+            
+            send_telegram_message(telegram_token, telegram_chat_id, basic_info)
+            
+            # 월별 요약 별도 전송
+            monthly_message = f"월별 성능 요약:\n{monthly_summary_str}"
+            send_telegram_message(telegram_token, telegram_chat_id, monthly_message)
+        else:
+            send_telegram_message(telegram_token, telegram_chat_id, overall_message)
+        
+        # 데이터베이스에 전체 성능 저장
+        save_xgboost_to_deep_learning_table(all_performance_df, buy_list_db, model_name)
+        
+        print("월별 성능 평가 완료!")
+        return all_performance_df
+    else:
+        message = "전체 검증 기간 동안 성능을 평가할 패턴이 없습니다."
+        print(message)
+        send_telegram_message(telegram_token, telegram_chat_id, message)
+        return pd.DataFrame()
+
+def load_best_non_overfitted_model(settings, max_f1=0.95):
+    """
+    F1 점수가 특정 값(기본 0.95) 미만인 모델 중 가장 성능이 좋은 모델을 찾아 로드합니다.
+    과적합된 모델(F1=1.0 또는 그에 가까운)을 피하기 위한 함수입니다.
+    """
+    model_dir = settings['model_dir']
+    
+    # 모든 체크포인트 메타데이터 파일 찾기
+    checkpoint_files = [f for f in os.listdir(model_dir) if f.endswith('_meta.pkl')]
+    
+    if not checkpoint_files:
+        print("모델 디렉토리에 체크포인트 파일이 없습니다.")
         return None, False
     
-
-    try:
-        # 메타데이터 로드
-        checkpoint_data = joblib.load(meta_path)
-        print(f"메타데이터 로드 완료: {meta_path}")
-        
-        # 모델 로드 시도
-        if os.path.exists(model_path):
-            model = xgb.XGBClassifier()
-            model.load_model(model_path)
-            checkpoint_data['best_model'] = model
-            print(f"모델 로드 완료: {model_path}")
-        else:
-            print(f"모델 파일이 없습니다. 메타데이터만 로드했습니다.")
-            checkpoint_data['best_model'] = None
-        
-        processed_items_count = len(checkpoint_data.get('processed_items', []))
-        print(f"이미 처리된 종목 수: {processed_items_count}")
-        return checkpoint_data, True
-    except Exception as e:
-        print(f"체크포인트 로드 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
+    # 각 체크포인트 파일 정보 저장
+    checkpoint_info = []
+    
+    for file in checkpoint_files:
+        try:
+            meta_path = os.path.join(model_dir, file)
+            model_path = os.path.join(model_dir, file.replace('_meta.pkl', '_model.json'))
+            meta_data = joblib.load(meta_path)
+            
+            # 모델 체크포인트 파일이 없으면 건너뛰기
+            if not os.path.exists(model_path):
+                continue
+                
+            # 가중 F1 점수 또는 일반 F1 점수 확인
+            f1_score = meta_data.get('best_weighted_f1', 0)
+            if f1_score == 0:
+                f1_score = meta_data.get('best_f1', 0)
+            
+            # 파일 생성 시간 확인
+            creation_time = os.path.getctime(meta_path)
+            creation_datetime = datetime.fromtimestamp(creation_time)
+            
+            # 과적합 체크: max_f1 미만인 경우만 저장
+            if f1_score < max_f1 and f1_score > 0:
+                checkpoint_info.append({
+                    'file': file,
+                    'model_path': model_path,
+                    'f1_score': f1_score,
+                    'creation_time': creation_time,
+                    'creation_datetime': creation_datetime,
+                    'meta_data': meta_data
+                })
+                print(f"체크포인트: {file}, F1: {f1_score:.4f}, 생성일시: {creation_datetime}")
+            else:
+                print(f"과적합 의심 체크포인트 제외: {file}, F1: {f1_score:.4f}")
+                
+        except Exception as e:
+            print(f"체크포인트 {file} 로드 중 오류 발생: {e}")
+    
+    if not checkpoint_info:
+        print("조건에 맞는 체크포인트가 없습니다.")
         return None, False
-
+    
+    # F1 점수 기준으로 정렬 (가장 높은 점수가 앞에 오도록)
+    checkpoint_info.sort(key=lambda x: x['f1_score'], reverse=True)
+    
+    # 가장 높은 F1 점수의 체크포인트 선택
+    best_checkpoint = checkpoint_info[0]
+    
+    print(f"\n선택된 최적 체크포인트:")
+    print(f"파일: {best_checkpoint['file']}")
+    print(f"F1 점수: {best_checkpoint['f1_score']:.4f}")
+    print(f"생성일시: {best_checkpoint['creation_datetime']}")
+    
+    try:
+        # 모델 로드
+        model = xgb.XGBClassifier()
+        model.load_model(best_checkpoint['model_path'])
+        best_checkpoint['meta_data']['best_model'] = model
+        
+        # 로드 성공 메시지
+        print(f"모델 로드 성공: {best_checkpoint['model_path']}")
+        return best_checkpoint['meta_data'], True
+    except Exception as e:
+        print(f"모델 로드 중 오류: {e}")
+        return None, False
 
 
 def main():
@@ -2325,6 +2790,16 @@ def main():
     # 환경 설정
     buy_list_db, craw_db, settings = setup_environment()
     
+    # 과적합 임계값 사용자 설정 옵션
+    overfit_threshold = input(f"과적합 판단 F1 점수 임계값 [0.95]: ").strip()
+    if overfit_threshold:
+        try:
+            settings['overfitting_threshold'] = float(overfit_threshold)
+            print(f"과적합 임계값이 {settings['overfitting_threshold']}로 설정되었습니다.")
+        except ValueError:
+            print("유효한 숫자가 아닙니다. 기본값 0.95를 사용합니다.")
+    
+
     # 데이터 로드
     filtered_results = load_filtered_stock_results(buy_list_db, settings['results_table'])
     
@@ -2338,48 +2813,92 @@ def main():
     model_filename = None
     best_threshold = 0.5  # 기본 임계값
     
-    # 모델 로드 또는 훈련 선택
-    best_model, best_accuracy, retrain = load_or_train_model(buy_list_db, craw_db, filtered_results, settings)
+    # 사용자 선택 옵션 확장
+    print("\n모델 선택 옵션:")
+    print("1. 기존 모델 로드")
+    print("2. 새 모델 훈련")
+    print("3. 과적합 제외 최적 모델 로드 (F1 < 0.95)")
+    choice = input("옵션을 선택하세요 (1/2/3) [1]: ").strip()
+    if not choice:
+        choice = "1"
+    
+    if choice == "3":
+        # 과적합 모델 제외한 최적 모델 로드
+        print("\n과적합 모델을 제외한 최적 모델 로드 중...")
+        max_f1 = float(input("최대 F1 점수 임계값 [0.95]: ") or "0.95")
+        checkpoint_data, found = load_best_non_overfitted_model(settings, max_f1)
+        
+        if found:
+            best_model = checkpoint_data.get('best_model')
+            best_f1 = checkpoint_data.get('best_f1', 0)
+            best_weighted_f1 = checkpoint_data.get('best_weighted_f1', 0)
+            processed_items = set(checkpoint_data.get('processed_items', []))
+            
+            print(f"로드된 모델 정보:")
+            print(f"F1 점수: {best_f1:.4f}")
+            print(f"가중 F1 점수: {best_weighted_f1:.4f}")
+            print(f"처리된 종목 수: {len(processed_items)}")
+            
+            # 사용자에게 이 모델에서 훈련을 계속할지 물어봄
+            retrain = input("이 모델에서 훈련을 계속하시겠습니까? (y/n) [y]: ").strip().lower()
+            retrain = retrain != 'n'  # 'n'이 아니면 True 반환
+        else:
+            print("과적합되지 않은 모델을 찾을 수 없습니다. 새 모델을 훈련합니다.")
+            best_model = None
+            best_f1 = 0
+            best_weighted_f1 = 0
+            retrain = True
+    else:
+        # 기존 로드 또는 훈련 선택 로직 실행
+        best_model, best_accuracy, retrain = load_or_train_model(buy_list_db, craw_db, filtered_results, settings)
     
     # 디버깅 로그 추가
-    print(f"Main function received: best_model={best_model is not None}, best_accuracy={best_accuracy}, retrain={retrain}")
+    print(f"Main function received: best_model={best_model is not None}, retrain={retrain}")
     
+    # 이하 기존 코드 동일...
     # 모델 훈련 (필요한 경우)
     if retrain:
-        # 임계값 설정 방법 선택
-        threshold_method = input("Select threshold optimization metric (recall/f1/precision) [recall]: ").strip().lower()
-        if not threshold_method:
-            threshold_method = 'recall'  # 기본값은 재현율
-        
-        # 체크포인트 간격 설정
-        checkpoint_interval_input = input("체크포인트를 저장할 종목 간격 설정 (기본값: 10): ").strip()
-        try:
-            checkpoint_interval = int(checkpoint_interval_input) if checkpoint_interval_input else 10
-        except ValueError:
-            checkpoint_interval = 10
-            print(f"잘못된 입력입니다. 기본값 {checkpoint_interval}으로 설정합니다.")
-        
-        print("Retrain flag is True. Starting model training...")
-        best_model, best_f1, best_threshold = train_models(  # best_accuracy 대신 best_f1 반환 받음
-            buy_list_db, craw_db, filtered_results, settings,
-            threshold_method=threshold_method,
-            checkpoint_interval=checkpoint_interval
+        # 모델 훈련 실행
+        best_model, best_accuracy, best_threshold = train_models(
+            buy_list_db, craw_db, filtered_results, settings, 
+            threshold_method='recall', checkpoint_interval=10
         )
         
-        # 최적 임계값을 모델에 저장
-        if best_model:
-            best_model.threshold_ = best_threshold
-            
-            # 모델 저장
-            model_filename = save_model(best_model, best_f1, settings)  # accuracy 대신 f1 전달
-        else:
-            print("Warning: No model was returned from train_models function!")
+        # 훈련된 모델 저장
+        if best_model is not None:
+            model_filename = save_model(best_model, best_accuracy, settings)
     
-    # 모델 검증
-    validation_results = validate_model(best_model, buy_list_db, craw_db, settings)
-    
-    # 성능 평가
-    evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename)
+    # 사용자에게 평가 방식 선택 요청
+    eval_method = input("월별 검증 및 성능 평가를 진행하시겠습니까? (y/n) [y]: ").strip().lower()
+    if not eval_method or eval_method == 'y':
+        # 연도 및 월 범위 입력 받기
+        try:
+            start_year = int(input("시작 연도 [2023]: ") or "2023")
+            start_month = int(input("시작 월 [1]: ") or "1")
+            end_year = int(input("종료 연도 [2023]: ") or "2023")
+            end_month = int(input("종료 월 [12]: ") or "12")
+        except ValueError:
+            print("올바른 숫자를 입력하지 않아 기본값을 사용합니다.")
+            start_year, start_month = 2023, 1
+            end_year, end_month = 2023, 12
+        
+        # 월별 검증 수행
+        validation_results = validate_model_by_months(
+            best_model, buy_list_db, craw_db, settings,
+            start_year=start_year, start_month=start_month,
+            end_year=end_year, end_month=end_month
+        )
+        
+        # 월별 성능 평가 수행
+        evaluate_performance_by_months(
+            validation_results, buy_list_db, craw_db, settings, model_filename,
+            start_year=start_year, start_month=start_month,
+            end_year=end_year, end_month=end_month
+        )
+    else:
+        # 기존 방식으로 전체 기간 검증
+        validation_results = validate_model(best_model, buy_list_db, craw_db, settings)
+        evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
