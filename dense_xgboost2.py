@@ -882,8 +882,8 @@ def validate_model(model, buy_list_db, craw_db, settings):
     
     # 검증 기간 설정
     print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-    validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+    validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
     
     # 모든 종목에 대해 검증 데이터 로드
     stock_items = get_stock_items(settings['host'], settings['user'], settings['password'], settings['database_buy_list'])
@@ -1066,8 +1066,8 @@ def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, sett
                 validation_start_date = max_date + pd.Timedelta(days=1)
                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
             else:
-                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+                validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+                validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
             
             # 검증 기간 동안의 패턴 필터링
             recent_patterns = df[

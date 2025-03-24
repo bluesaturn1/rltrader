@@ -798,8 +798,8 @@ def predict_pattern_optimized(model, df, code_name, use_data_dates=True):
             validation_start_date = max_date + pd.Timedelta(days=1)
             validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
         else:
-            validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-            validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+            validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+            validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
         print(f"Validation period: {validation_start_date} to {validation_end_date}")
         
         # 검증 기간 내 패턴 필터링
@@ -1057,7 +1057,7 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     validation_results = pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
     
     validation_end_date = validation_chunks[0]  # 마지막 날짜
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
     
     print(f"마지막 날짜({validation_end_date}) 기준으로 예측을 수행하고 {validation_start_date}~{validation_end_date} 기간의 결과를 수집합니다.")
 
@@ -1416,8 +1416,8 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
 
 def run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name='lstm'):
     print(f"\n마지막 날짜 기준 검증 수행: {cf.VALIDATION_START_DATE} ~ {cf.VALIDATION_END_DATE}")
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-    validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+    validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
 
     stock_items = get_stock_items(host, user, password, database_buy_list)
     total_stock_items = len(stock_items)

@@ -1801,8 +1801,8 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
             else:
                 # 예측 모드: cf.py 설정 사용
-                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+                validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+                validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
             
             print(f"Validation period: {validation_start_date} to {validation_end_date}")
             
@@ -2619,8 +2619,8 @@ def validate_model(model, buy_list_db, craw_db, settings):
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
     
     print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE), format='%Y%m%d')
-    validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE), format='%Y%m%d')    
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+    validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)   
     validation_results = pd.DataFrame()
     
     # 종목 목록 가져오기

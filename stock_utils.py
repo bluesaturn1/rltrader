@@ -42,6 +42,7 @@ def get_stock_items(host, user, password, database):
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
+
 def filter_stocks(stock_items_df):
     """
     종목 필터링: 우선주 등 제외하는 함수
@@ -80,3 +81,18 @@ def filter_stocks(stock_items_df):
         filtered_stocks.append(row)
     
     return pd.DataFrame(filtered_stocks)
+
+# stock_utils.py 파일에 새 함수 추가
+def get_stock_items_from_db_manager(db_manager):
+    """DBConnectionManager 객체를 사용하여 종목 목록을 가져옵니다."""
+    try:
+        query = "SELECT code, code_name FROM stock_item_all"
+        df = db_manager.execute_query(query)
+        
+        if df.empty:
+            return []
+            
+        return list(zip(df['code'], df['code_name']))
+    except Exception as e:
+        print(f"Error fetching stock items: {e}")
+        return []

@@ -1277,8 +1277,8 @@ def setup_validation_environment(settings):
     buy_list_db = settings['buy_list_db']
     
     # 검증 날짜 범위 설정
-    validation_start = datetime.strptime(cf.VALIDATION_START_DATE, '%Y%m%d').date()
-    validation_end = datetime.strptime(cf.VALIDATION_END_DATE, '%Y%m%d').date()
+    validation_start = datetime.strptime(cf.VALIDATION_START_DATE)
+    validation_end = datetime.strptime(cf.VALIDATION_END_DATE)
     
     # 검증 날짜 범위 확인
     print(f"검증 기간: {validation_start} ~ {validation_end}")
