@@ -2166,7 +2166,6 @@ def custom_time_series_split(X, y, test_size=0.2):
     return train_indices, test_indices
 
 
-
 def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_method='recall', checkpoint_interval=10):
     """XGBoost 모델을 훈련합니다. 중간에 체크포인트를 저장하고 이어서 훈련할 수 있습니다."""
     print("Retraining the model...")
@@ -2343,6 +2342,11 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                         _, weighted_f1 = optimize_multiclass_threshold(model, X_test, y_test)
                         
                         if weighted_f1 > best_weighted_f1 or best_model is None:
+                            # f1 score가 0.95 이상이면 모델 제외
+                            if weighted_f1 >= 0.95:
+                                print(f"가중 F1 점수가 0.95 이상입니다. 모델을 제외합니다.")
+                                continue
+                            
                             best_model = model
                             best_weighted_f1 = weighted_f1
                             print(f"\n새로운 최적 다중 클래스 모델 발견 - {stock_name}")
@@ -2383,6 +2387,11 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                         f1 = safe_f1_score(y_test, y_pred, zero_division=1)
                         
                         if f1 > best_f1 or best_model is None:
+                            # f1 score가 0.95 이상이면 모델 제외
+                            if f1 >= 0.95:
+                                print(f"F1 점수가 0.95 이상입니다. 모델을 제외합니다.")
+                                continue
+                            
                             best_model = model
                             best_f1 = f1
                             best_threshold = getattr(model, 'threshold_', 0.5)
@@ -2548,8 +2557,6 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         return best_model, best_weighted_f1, 0.5  # 다중 클래스는 임계값이 의미 없음
     else:
         return best_model, best_f1, best_threshold
-
-
 
 def save_model(model, accuracy, settings):
     """학습된 모델을 저장합니다."""

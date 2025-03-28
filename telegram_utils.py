@@ -29,4 +29,3 @@ def send_long_telegram_message(telegram_token, telegram_chat_id, message):
     for i in range(0, len(message), max_chunk_size):
         chunk = message[i:i + max_chunk_size]
         send_telegram_message(telegram_token, telegram_chat_id, chunk)
-   
