@@ -5,10 +5,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
+import validation_utils
 from mysql_loader import list_tables_in_database, load_data_from_mysql
 from stock_utils import get_stock_items
 from tqdm import tqdm
-from telegram_utils import send_telegram_message
+from telegram_utils import send_telegram_message, send_long_telegram_message
 from datetime import datetime, timedelta
 from imblearn.over_sampling import SMOTE
 from tensorflow.keras.models import Sequential
@@ -116,7 +117,7 @@ def clear_memory():
 
 def select_stocks_for_training(filtered_results):
     """사용자가 훈련에 사용할 종목을 선택할 수 있는 함수"""
-    unique_codes = filtered_results['code_name'].unique()
+    unique_codes = filtered_results['stock_name'].unique()
     total_codes = len(unique_codes)
     
     print(f"\n총 {total_codes}개 종목이 있습니다.")
@@ -175,7 +176,7 @@ def select_stocks_for_training(filtered_results):
         return filtered_results
     
     # 선택된 종목만 필터링
-    filtered_subset = filtered_results[filtered_results['code_name'].isin(selected_codes)].copy()
+    filtered_subset = filtered_results[filtered_results['stock_name'].isin(selected_codes)].copy()
     print(f"선택된 종목들: {', '.join(selected_codes[:5])}{'...' if len(selected_codes) > 5 else ''}")
     print(f"총 {len(filtered_subset)}개 데이터 포인트가 훈련에 사용됩니다.")
     
@@ -414,15 +415,15 @@ def train_lstm_model(X, y):
         print(f'Error training LSTM model: {e}')
         return None 
 
-def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id, code_name, current_idx=None, total_codes=None):
+def train_improved_lstm_model(df_500, settings, stock_name, current_idx=None, total_codes=None):
     try:
-        print(f'Training improved LSTM model for {code_name}')
-        if filtered_results.empty:
+        print(f'Training improved LSTM model for {stock_name}')
+        if df_500.empty:
             print("Filtered results are empty. Cannot train model.")
             return None
         
-        X = filtered_results[COLUMNS_TRAINING_DATA]
-        y = filtered_results['Label']
+        X = df_500[COLUMNS_TRAINING_DATA]
+        y = df_500['Label']
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         y = y[X.index]
         
@@ -472,7 +473,7 @@ def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir,
                     1: len(y_train) / (2 * pos_samples)
                 }
             else:
-                print(f"Warning: Only one class present in training data for {code_name}. Using default weights.")
+                print(f"Warning: Only one class present in training data for {stock_name}. Using default weights.")
                 class_weights = {0: 1.0, 1.0: 1.0}
             
             # 모델 훈련
@@ -488,11 +489,11 @@ def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir,
             
             # 검증 손실 확인
             val_loss = min(history.history['val_loss'])
-            print(f"Validation loss for {code_name}: {val_loss:.4f}")
+            print(f"Validation loss for {stock_name}: {val_loss:.4f}")
             
             # if val_loss > 10:  # 임계값 설정
-            #     print(f"⚠️ Validation loss for {code_name} is too high ({val_loss:.4f}). Skipping this stock.")
-            #     excluded_stocks.append(code_name)
+            #     print(f"⚠️ Validation loss for {stock_name} is too high ({val_loss:.4f}). Skipping this stock.")
+            #     excluded_stocks.append(stock_name)
             #     return None
             
             # 가장 좋은 모델 저장
@@ -514,9 +515,10 @@ def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir,
         traceback.print_exc()
         return None
 
-def train_continued_lstm_model(filtered_results, previous_model, code_name, current_idx, total_codes):
+
+def train_continued_lstm_model(filtered_results, previous_model, stock_name, current_idx, total_codes):
     try:
-        print(f'Continuing training of model with {code_name} data')
+        print(f'Continuing training of model with {stock_name} data')
         X = filtered_results[COLUMNS_TRAINING_DATA]
         y = filtered_results['Label']
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
@@ -550,7 +552,7 @@ def train_continued_lstm_model(filtered_results, previous_model, code_name, curr
             }
         else:
             idx_info = f" ({current_idx+1}/{total_codes})" if current_idx is not None else ""
-            print(f"Warning: Only one class present in training data for {code_name}{idx_info}. Using default weights.")
+            print(f"Warning: Only one class present in training data for {stock_name}{idx_info}. Using default weights.")
             class_weights = {0: 1.0, 1: 1.0}
         
         # 기존 모델에 추가 훈련
@@ -625,12 +627,12 @@ def predict_batch(model, x):
 
 
 # predict_pattern 함수 수정
-def predict_pattern(model, df, stock_code, use_data_dates=True):
+def predict_pattern(model, df, stock_name, use_data_dates=True):
     try:
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'stock_code'])
+            return pd.DataFrame(columns=['date', 'stock_name'])
             
         # 업데이트된 COLUMNS_TRAINING_DATA 사용
         X = df[COLUMNS_TRAINING_DATA]
@@ -646,10 +648,10 @@ def predict_pattern(model, df, stock_code, use_data_dates=True):
         print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
         
         # 나머지 코드는 동일
-        return df[['date', 'stock_code', 'Prediction']]
+        return df[['date', 'stock_name', 'Prediction']]
     except Exception as e:
         print(f'Error predicting patterns: {e}')
-        return pd.DataFrame(columns=['date', 'stock_code'])
+        return pd.DataFrame(columns=['date', 'stock_name'])
 
 
 # 더 효율적인 예측 함수
@@ -657,9 +659,9 @@ def predict_pattern(model, df, stock_code, use_data_dates=True):
 def predict_batch(model, x):
     return model(x, training=False)
 
-def validate_single_stock(model, code_name, craw_db, validation_start, validation_end, settings):
+def validate_single_stock(model, stock_name, craw_db, validation_start, validation_end, settings):
     """단일 종목에 대한 검증을 수행합니다."""
-    print(f"\n===== {code_name} 검증 시작 =====")   
+    print(f"\n===== {stock_name} 검증 시작 =====")   
     stock_results = []
 
     # validation_start와 validation_end를 datetime.date 형식으로 변환
@@ -668,10 +670,10 @@ def validate_single_stock(model, code_name, craw_db, validation_start, validatio
 
     # 특성 추출에 필요한 충분한 데이터를 확보하기 위해 검증 시작일로부터 충분히 이전부터 데이터 로드
     load_start_date = validation_start - timedelta(days=1200)  # 검증 시작일 기준으로 이전 데이터
-    df = load_daily_craw_data(craw_db, code_name, load_start_date, validation_end)
+    df = load_daily_craw_data(craw_db, stock_name, load_start_date, validation_end)
     
     if df.empty or len(df) < 739:  # 최소 739봉 필요
-        print(f"{code_name}: Insufficient data for validation because only {len(df)} candles found.")
+        print(f"{stock_name}: Insufficient data for validation because only {len(df)} candles found.")
         return []
     
     # 특성 추출
@@ -711,7 +713,7 @@ def validate_single_stock(model, code_name, craw_db, validation_start, validatio
             validation_dates = [latest_data_date]
             print(f"⚠️ 가장 최근 날짜 ({latest_data_date})를 사용합니다.")
         else:
-            print(f"{code_name}에 대한 검증을 건너뜁니다.")
+            print(f"{stock_name}에 대한 검증을 건너뜁니다.")
             return []
     
     print(f"검증 대상 날짜: {validation_dates}")
@@ -722,16 +724,16 @@ def validate_single_stock(model, code_name, craw_db, validation_start, validatio
         historical_df = df[df['date'] <= current_date].tail(500).reset_index(drop=True)
         
         if len(historical_df) < 500:  # 최소 500봉 필요
-            print(f"{code_name}: Insufficient data for prediction on {current_date} (only {len(historical_df)} candles).")
+            print(f"{stock_name}: Insufficient data for prediction on {current_date} (only {len(historical_df)} candles).")
             continue
         
         # 예측 수행
-        result = predict_for_date(model, df, code_name, current_date, historical_df, settings)
+        result = predict_for_date(model, df, stock_name, current_date, historical_df, settings)
         
         # result가 None인 경우 기본값으로 채우기
         if result is None:
             result = {
-                'code_name': code_name,
+                'stock_name': stock_name,
                 'date': current_date,
                 'confidence': 0.0,
                 'action': 0,
@@ -743,19 +745,19 @@ def validate_single_stock(model, code_name, craw_db, validation_start, validatio
     
     return stock_results
 
-def predict_pattern_optimized(model, df, code_name, use_data_dates=True):
+def predict_pattern_optimized(model, df, stock_name, use_data_dates=True):
     try:
         print('Predicting patterns (optimized)')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
         
         # 데이터 전처리
         X = df[COLUMNS_TRAINING_DATA]
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         if X.empty:
             print("Empty features data, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
         
         # 데이터 차원 확장
         batch_size = 128
@@ -773,7 +775,7 @@ def predict_pattern_optimized(model, df, code_name, use_data_dates=True):
                     predictions[i:end_idx] = model.predict(batch, verbose=0)
         except Exception as e:
             print(f"Error during prediction: {e}")
-            return pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
         
         # 결과 처리
         df_result = df.loc[X.index].copy()
@@ -790,7 +792,7 @@ def predict_pattern_optimized(model, df, code_name, use_data_dates=True):
             df_result = df_result.dropna(subset=['date'])
         except Exception as e:
             print(f"Error processing dates: {e}")
-            return pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
         
         # 검증 기간 설정
         if use_data_dates:
@@ -811,134 +813,19 @@ def predict_pattern_optimized(model, df, code_name, use_data_dates=True):
         print(f'Filtered patterns in validation period: {len(recent_patterns)}')
         
         if not recent_patterns.empty:
-            recent_patterns['code_name'] = code_name
-            result_df = recent_patterns[['date', 'code_name', 'Prediction']]
-            print(f'Found patterns for {code_name}:')
+            recent_patterns['stock_name'] = stock_name
+            result_df = recent_patterns[['date', 'stock_name', 'Prediction']]
+            print(f'Found patterns for {stock_name}:')
             print(result_df)
             return result_df
         else:
-            print(f'No patterns found for {code_name} in validation period')
-            return pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
+            print(f'No patterns found for {stock_name} in validation period')
+            return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
     except Exception as e:
         print(f'Error in optimized prediction: {e}')
         import traceback
         traceback.print_exc()
-        return pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
-
-def evaluate_performance_improved(df, start_date, end_date):
-    """최대 수익률과 최대 손실을 모두 계산하는 개선된 성능 평가 함수"""
-    try:
-        print('Evaluating performance with risk metrics')
-        df['date'] = pd.to_datetime(df['date'])
-        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-        
-        if df.empty:
-            print(f"No data found between {start_date} and {end_date}")
-            return None, None, None
-            
-        # 초기 종가 (매수 가격)
-        initial_close = df['close'].iloc[0]
-        
-        # 일별 수익률 계산
-        df['daily_return'] = df['close'] / initial_close - 1
-        
-        # 최대 상승률 계산
-        max_return = df['daily_return'].max() * 100
-        max_return_day = df.loc[df['daily_return'].idxmax(), 'date']
-        
-        # 최대 하락률 계산
-        max_loss = df['daily_return'].min() * 100
-        max_loss_day = df.loc[df['daily_return'].idxmin(), 'date']
-        
-        # 위험 조정 수익률 (최대 상승률 - 최대 하락률의 절대값)
-        risk_adjusted_return = max_return - abs(max_loss)
-        
-        result = {
-            'max_return': max_return,
-            'max_return_day': max_return_day,
-            'max_loss': max_loss,
-            'max_loss_day': max_loss_day,
-            'risk_adjusted_return': risk_adjusted_return
-        }
-        
-        return result
-        
-    except Exception as e:
-        print(f'Error evaluating performance: {e}')
-        import traceback
-        traceback.print_exc()
-        return None
-
-# 성능 결과 저장 함수도 수정
-def save_lstm_predictions_to_db(db_manager, predictions_df, model_name=None):
-    """LSTM 예측 결과를 deep_learning 테이블에 저장합니다."""
-    try:
-        # 필요한 컬럼만 추출하고 테이블 형식에 맞게 컬럼명 변경
-        dl_data = predictions_df[['pattern_date', 'code_name', 'prediction', 'risk_adjusted_return']].copy()
-        # 모델 이름 설정 (제공된 이름이 없으면 'lstm' 사용)
-        method_name = model_name if model_name else 'lstm'
-        dl_data['method'] = method_name
-        
-        # 컬럼명 변경
-        dl_data = dl_data.rename(columns={
-            'pattern_date': 'date',    
-            'prediction': 'confidence',
-            'risk_adjusted_return': 'estimated_profit_rate'  # max_return을 estimated_profit_rate로 변환
-        })
-        
-        
-        # 기존 데이터 중복 확인을 위한 코드명, 날짜, 메소드 조합 가져오기
-        existing_query = f"""
-            SELECT DISTINCT date, code_name, method FROM deep_learning
-        """
-        existing_data = db_manager.execute_query(existing_query)
-        
-        if not existing_data.empty:
-            # date, code_name, method를 튜플로 묶어 중복 확인용 세트 생성
-            existing_pairs = set()
-            for _, row in existing_data.iterrows():
-                # 날짜 형식 통일 (문자열 비교 시 오류 방지)
-                date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                existing_pairs.add((date, row['code_name'], row['method']))
-                
-            # 저장할 데이터를 필터링하여 중복 제거
-            new_data = []
-            duplicate_count = 0
-            
-            for idx, row in dl_data.iterrows():
-                # 날짜 형식 통일
-                date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                pair = (date, row['code_name'], row['method'])
-                
-                if pair not in existing_pairs:
-                    new_data.append(row)
-                else:
-                    duplicate_count += 1
-            
-            if duplicate_count > 0:
-                print(f"Skipping {duplicate_count} duplicate entries already in the database.")
-                
-            if not new_data:
-                print("All entries already exist in the database. Nothing to save.")
-                return True
-                
-            # 중복 제거된 데이터만 저장
-            dl_data = pd.DataFrame(new_data)
-            
-        # 저장할 데이터가 있는 경우에만 저장 진행
-        if not dl_data.empty:
-            result = db_manager.to_sql(dl_data, 'deep_learning')  # if_exists와 index 파라미터 제거
-            if result:
-                print(f"✅ {len(dl_data)}개 {method_name} 예측 결과를 deep_learning 테이블에 저장했습니다.")
-            return result
-        else:
-            print("No new data to save after duplicate filtering.")
-            return True
-    except Exception as e:
-        print(f"❌ 예측 결과 저장 중 오류 발생: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
 
 def validate_by_date_window(model, db_manager, stock_items, validation_start_date, validation_end_date):
     """각 날짜별로 n-500 ~ n봉까지 데이터로 검증"""
@@ -969,7 +856,7 @@ def validate_by_date_window(model, db_manager, stock_items, validation_start_dat
         patterns_found_today = 0
         
         for idx, row in stock_pbar:
-            table_name = row.code_name
+            table_name = row.stock_name
             stock_pbar.set_postfix({'종목': table_name, '발견': patterns_found_today})
             
             # n-500 ~ n봉 데이터 로드
@@ -1014,47 +901,9 @@ def validate_by_date_window(model, db_manager, stock_items, validation_start_dat
     print(f"\n검증 완료: 총 {total_patterns_found}개 패턴 발견")
     return pd.DataFrame(all_results)
 
-def analyze_top_performers_by_date(performance_df, top_n=3):
-    """날짜별로 상위 성과를 보인 종목을 분석"""
-    try:
-        # 날짜별로 그룹화
-        performance_df['pattern_date'] = pd.to_datetime(performance_df['pattern_date'])
-        date_grouped = performance_df.groupby(performance_df['pattern_date'].dt.date)
-        
-        results = []
-        date_summaries = []
-        
-        # 각 날짜별로 처리
-        for date, group in date_grouped:
-            print(f"\n날짜: {date} - Prediction 기준 상위 {top_n}개 종목")
-            # prediction 기준 상위 종목 선택
-            top_stocks = group.nlargest(top_n, 'prediction')
-            print(top_stocks[['code_name', 'prediction', 'max_return', 'max_loss', 'risk_adjusted_return']])
-            
-            # 날짜별 요약 통계
-            date_summary = {
-                'date': date,
-                'total_patterns': len(group),
-                'avg_risk_adjusted_return': group['risk_adjusted_return'].mean(),
-                'avg_max_return': group['max_return'].mean(),
-                'avg_max_loss': group['max_loss'].mean(),
-                'top_performer': top_stocks.iloc[0]['code_name'] if len(top_stocks) > 0 else None,
-                'top_return': top_stocks.iloc[0]['risk_adjusted_return'] if len(top_stocks) > 0 else None
-            }
-            
-            date_summaries.append(date_summary)
-            results.append({'date': date, 'top_stocks': top_stocks})
-        
-        return results, pd.DataFrame(date_summaries)
-        
-    except Exception as e:
-        print(f'Error analyzing top performers: {e}')
-        import traceback
-        traceback.print_exc()
-        return [], pd.DataFrame()
 
 def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
-    validation_results = pd.DataFrame(columns=['date', 'code_name', 'Prediction'])
+    validation_results = pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
     
     validation_end_date = validation_chunks[0]  # 마지막 날짜
     validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
@@ -1062,15 +911,15 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     print(f"마지막 날짜({validation_end_date}) 기준으로 예측을 수행하고 {validation_start_date}~{validation_end_date} 기간의 결과를 수집합니다.")
 
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), desc="종목 검증", total=len(stock_items)):
-        code_name = row.code_name
-        print(f"\n검증 중인 종목: {code_name}")
+        stock_name = row.stock_name
+        print(f"\n검증 중인 종목: {stock_name}")
         try:
             # 전체 기간 데이터를 한 번에 로드
             window_start_date = validation_start_date - timedelta(days=1200)  # 충분한 과거 데이터 확보
-            all_df = load_daily_craw_data(craw_db, code_name, window_start_date, validation_end_date)
+            all_df = load_daily_craw_data(craw_db, stock_name, window_start_date, validation_end_date)
             
             if all_df.empty:
-                print(f"⚠️ {code_name} - 데이터가 없습니다. 건너뜁니다.")
+                print(f"⚠️ {stock_name} - 데이터가 없습니다. 건너뜁니다.")
                 continue
                 
             # 날짜 형식을 datetime으로 변환
@@ -1079,7 +928,7 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
             # 정지 종목 확인
             suspension_check_df = all_df.copy()
             if len(suspension_check_df) >= 5 and all(volume == 0 for volume in suspension_check_df.tail(5)['volume']):
-                print(f"⚠️ {code_name} - 정지종목으로 감지됨 (최근 5일간 거래량 0)")
+                print(f"⚠️ {stock_name} - 정지종목으로 감지됨 (최근 5일간 거래량 0)")
                 continue
             
             # 마지막 날짜 기준으로 과거 500봉 데이터 추출
@@ -1093,15 +942,15 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
                 df_features = df_features.tail(500).copy()
                 
                 # 예측 수행 - validation_start_date부터 validation_end_date까지의 모든 날짜에 대한 예측을 한 번에 수행
-                result = predict_pattern_optimized(best_model, df_features, code_name, use_data_dates=False)
+                result = predict_pattern_optimized(best_model, df_features, stock_name, use_data_dates=False)
                 
                 if isinstance(result, pd.DataFrame) and not result.empty:
                     # 결과 병합
                     validation_results = pd.concat([validation_results, result], ignore_index=True)
-                    print(f"✅ {code_name}에 대해 {len(result)}개 예측 결과 발견")
+                    print(f"✅ {stock_name}에 대해 {len(result)}개 예측 결과 발견")
 
         except Exception as e:
-            print(f"Error processing {code_name}: {e}")
+            print(f"Error processing {stock_name}: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1115,7 +964,7 @@ def filter_top_n_per_date(validation_results, top_n_per_date=3):
     
     if not validation_results.empty and 'date' in validation_results.columns:
         # 먼저 중복 항목 제거 (종목명과 날짜 기준)
-        validation_results = validation_results.drop_duplicates(subset=['code_name', 'date'])
+        validation_results = validation_results.drop_duplicates(subset=['stock_name', 'date'])
         
         # 그 후 날짜별 상위 N개 종목 선택
         date_groups = validation_results.groupby(validation_results['date'].dt.date)
@@ -1129,297 +978,12 @@ def filter_top_n_per_date(validation_results, top_n_per_date=3):
     
     return validation_results
 
-def evaluate_performance(validation_results, craw_db):
-    # 열 이름을 소문자로 변환
-    validation_results.columns = validation_results.columns.str.lower()
-    print("Columns in validation_results:", validation_results.columns.tolist())
-    performance_results = []
-    for index, row in validation_results.iterrows():
-        code_name = row['code_name']
-        pattern_date = row['date']
-        prediction = row['prediction']  # validation_results에서 prediction 값 가져오기
-        
-        # 매수 시작일: pattern_date 다음 날
-        start_date = pattern_date + timedelta(days=1)
-        end_date = start_date + timedelta(days=60)  # 60일 후까지
-        
-        print(f"Evaluating performance for {code_name} from {start_date} to {end_date}")
-        
-        # 데이터 로드
-        df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
-        if df.empty:
-            print(f"No data found for {code_name} from {start_date} to {end_date}")
-            continue
-        
-        try:
-            # 초기 종가 (매수 가격)
-            initial_close = df['close'].iloc[0]
-            
-            # 일별 수익률 계산
-            df['daily_return'] = df['close'] / initial_close - 1
-            
-            # 최대 상승률 계산
-            max_return = df['daily_return'].max() * 100
-            max_return_day = df.loc[df['daily_return'].idxmax(), 'date']
-            
-            # 최대 하락률 계산
-            max_loss = df['daily_return'].min() * 100
-            max_loss_day = df.loc[df['daily_return'].idxmin(), 'date']
-            
-            # 위험 조정 수익률 계산
-            risk_adjusted_return = max_return - abs(max_loss)
-            
-            # 결과 저장
-            performance_results.append({
-                'code_name': code_name,
-                'pattern_date': pattern_date,
-                'prediction': prediction,  # prediction 값 추가
-                'start_date': start_date,
-                'end_date': end_date,
-                'max_return': max_return,
-                'max_return_day': max_return_day,
-                'max_loss': max_loss,
-                'max_loss_day': max_loss_day,
-                'risk_adjusted_return': risk_adjusted_return
-            })
-        except Exception as e:
-            print(f"Error evaluating performance for {code_name}: {e}")
-            continue
-    
-    return pd.DataFrame(performance_results)
-
-def save_performance_to_db(df, db_manager, table):
-    """성능 평가 결과를 데이터베이스 테이블에 저장합니다."""
-    try:
-        # 데이터가 비어있으면 바로 반환
-        if df.empty:
-            print("No performance data to save.")
-            return False
-
-        # 테이블 존재 여부 확인
-        check_query = f"SHOW TABLES LIKE '{table}'"
-        check_result = db_manager.execute_query(check_query)
-        
-        # 테이블이 존재하지 않으면 생성
-        if check_result.empty:
-            print(f"Table {table} does not exist. Creating it...")
-            create_table_query = f"""
-            CREATE TABLE `{table}` (
-                `id` int NOT NULL AUTO_INCREMENT,
-                `code_name` varchar(20) NOT NULL,
-                `date` datetime NOT NULL,
-                `prediction` float NOT NULL,
-                `start_date` datetime NULL,
-                `end_date` datetime NULL,
-                `max_return` float NULL,
-                `max_return_day` datetime NULL,
-                `max_loss` float NULL,
-                `max_loss_day` datetime NULL,
-                `estimated_profit_rate` float NULL,
-                PRIMARY KEY (`id`),
-                UNIQUE KEY `unique_record` (`code_name`,`date`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """
-            db_manager.execute_query(create_table_query)
-            print(f"Table {table} created successfully")
-            table_columns = ['id', 'code_name', 'date', 'prediction', 'start_date', 'end_date', 'max_return', 'max_return_day', 'max_loss', 'max_loss_day', 'estimated_profit_rate']
-        else:
-            # 테이블 구조 확인
-            structure_query = f"DESCRIBE {table}"
-            table_structure = db_manager.execute_query(structure_query)
-            
-            if not table_structure.empty:
-                # print(f"테이블 구조 확인: {table}")
-                # print(table_structure)
-                
-                # 테이블의 컬럼명 가져오기
-                table_columns = table_structure['Field'].tolist()
-                # print(f"테이블 컬럼: {table_columns}")
-            else:
-                print(f"테이블 {table}의 구조를 확인할 수 없습니다.")
-                return False
-        
-        # 데이터프레임 컬럼 출력
-        # print(f"데이터프레임 컬럼: {df.columns.tolist()}")
-        
-        # 컬럼 매핑
-        column_mapping = {}
-        if 'pattern_date' in df.columns and 'date' in table_columns:
-            column_mapping['pattern_date'] = 'date'
-        if 'risk_adjusted_return' in df.columns and 'estimated_profit_rate' in table_columns:
-            column_mapping['risk_adjusted_return'] = 'estimated_profit_rate'
-        
-        # 확인된 매핑으로 컬럼명 변경
-        if column_mapping:
-            df = df.rename(columns=column_mapping)
-            # print(f"컬럼명 변경: {column_mapping}")
-        
-        # 기존 데이터 중복 확인을 위한 코드명과 날짜 조합 가져오기
-        date_column = 'date'  # 기본값으로 'date' 사용
-        existing_query = f"""
-            SELECT DISTINCT code_name, {date_column} FROM {table}
-        """
-        
-        try:
-            existing_data = db_manager.execute_query(existing_query)
-        except Exception as e:
-            print(f"중복 데이터 확인 중 오류 발생: {e}")
-            existing_data = pd.DataFrame()
-        
-        if not existing_data.empty:
-            # code_name과 날짜를 튜플로 묶어 중복 확인용 세트 생성
-            existing_pairs = set()
-            for _, row in existing_data.iterrows():
-                # 날짜 형식 통일 (문자열 비교 시 오류 방지)
-                if pd.notnull(row[date_column]):
-                    date_value = pd.to_datetime(row[date_column]).strftime('%Y-%m-%d')
-                    existing_pairs.add((row['code_name'], date_value))
-            
-            # 저장할 데이터에서 date_column 찾기
-            date_column_in_df = date_column
-            if date_column not in df.columns:
-                if 'pattern_date' in df.columns:
-                    date_column_in_df = 'pattern_date'
-                elif 'date' in df.columns:
-                    date_column_in_df = 'date'
-            
-            # 저장할 데이터를 필터링하여 중복 제거
-            new_data = []
-            duplicate_count = 0
-            
-            for idx, row in df.iterrows():
-                # 날짜 형식 통일
-                if pd.notnull(row[date_column_in_df]):
-                    date_value = pd.to_datetime(row[date_column_in_df]).strftime('%Y-%m-%d')
-                    pair = (row['code_name'], date_value)
-                    
-                    if pair not in existing_pairs:
-                        new_data.append(row)
-                    else:
-                        duplicate_count += 1
-            
-            if duplicate_count > 0:
-                print(f"Skipping {duplicate_count} duplicate entries already in the database.")
-                
-            if not new_data:
-                print("All entries already exist in the database. Nothing to save.")
-                return True
-                
-            # 중복 제거된 데이터만 저장
-            df_to_save = pd.DataFrame(new_data)
-        else:
-            # 기존 데이터가 없으면 모두 저장
-            df_to_save = df
-            
-        # 저장할 데이터가 있는 경우에만 저장 진행
-        if not df_to_save.empty:
-            # 테이블 컬럼과 맞지 않는 컬럼 제거
-            columns_to_drop = [col for col in df_to_save.columns if col not in table_columns]
-            if columns_to_drop:
-                df_to_save = df_to_save.drop(columns=columns_to_drop)
-                print(f"제거된 컬럼: {columns_to_drop}")
-            
-            # 저장
-            result = db_manager.to_sql(df_to_save, table)
-            if result:
-                print(f"✅ {len(df_to_save)} performance results saved to {table} table")
-            return result
-        else:
-            print("No new data to save after duplicate filtering.")
-            return True
-            
-    except Exception as e:
-        print(f"❌ Error saving performance results to MySQL: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-def send_validation_summary(validation_results, performance_df, telegram_token, telegram_chat_id, results_table, buy_list_db, model_name='lstm'):
-    print("\n=== 검증 결과 요약 ===")
-    
-    # 열 이름을 소문자로 변환
-    validation_results.columns = validation_results.columns.str.lower()
-    performance_df.columns = performance_df.columns.str.lower()
-    
-    # 검증 결과 요약 출력
-    total_predictions = len(validation_results)
-    total_performance = len(performance_df)
-    print(f"총 예측 수: {total_predictions}")
-    print(f"성과 평가 수: {total_performance}")
-    
-    if not performance_df.empty:
-        # Estimated profit rate 추가
-        performance_df['estimated_profit_rate'] = performance_df['max_return'] - performance_df['max_loss'] 
-        # 총 수익률 통계
-        avg_return = performance_df['estimated_profit_rate'].mean()
-        max_return = performance_df['max_return'].max()
-        max_loss = performance_df['max_loss'].min()
-        # performance_df에서 risk_adjusted_return 열의 평균값 계산
-        if 'risk_adjusted_return' in performance_df.columns:
-            avg_risk_adjusted_return = performance_df['risk_adjusted_return'].mean()
-            print(f"평균 Risk Adjusted Return: {avg_risk_adjusted_return:.2f}%")
-        else:
-            print("Error: 'risk_adjusted_return' 열이 performance_df에 없습니다.") 
-        print(f"평균 최대 수익률: {avg_return:.2f}%")
-        print(f"최고 수익률: {max_return:.2f}%")
-        print(f"최고 손실률: {max_loss:.2f}%")
-        
-        # 텔레그램 메시지 생성
-        message = (
-            "=== 검증 결과 요약(fire_lstm) ===\n"
-            f"총 예측 수: {total_predictions}\n"
-            f"성과 평가 수: {total_performance}\n"
-            f"평균 최대 수익률: {avg_return:.2f}%\n"
-            f"평균 risk adjusted return {avg_risk_adjusted_return:.2f}%\n"
-            f"최고 수익률: {max_return:.2f}%\n"
-            f"최저 손실률: {max_loss:.2f}%\n"
-        )
-        
-        # 날짜별 상위 종목 분석
-        try:
-            results, summaries = analyze_top_performers_by_date(performance_df, top_n=3)
-            
-            message += "\n===== 날짜별 상위 3개 종목 =====\n"
-            for result in results:
-                date = result['date']
-                top_stocks = result['top_stocks']
-                message += f"\n날짜: {date}\n"
-                message += "종목명 | Prediction | 최대 수익률 | 최대 손실 | 위험 조정 수익률\n"
-                for _, row in top_stocks.iterrows():
-                    message += (
-                        f"{row['code_name']} | {row['prediction']:.2f} | "
-                        f"{row['max_return']:.2f}% | {row['max_loss']:.2f}% | "
-                        f"{row['risk_adjusted_return']:.2f}%\n"
-                    )
-        except Exception as e:
-            print(f"Error analyzing top performers: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # 텔레그램 메시지 전송
-        send_telegram_message(telegram_token, telegram_chat_id, message)
-        
-        # DB에 저장
-        if buy_list_db is not None:
-            performance_table = 'dense_lstm_performance'
-            save_performance_to_db(performance_df, buy_list_db, performance_table)
-            save_lstm_predictions_to_db(buy_list_db, performance_df, model_name)
-    else:
-        print("성과 데이터가 비어있습니다.")
-        message = (
-            "=== 검증 결과 요약 ===\n"
-            f"총 예측 수: {total_predictions}\n"
-            f"성과 평가 수: {total_performance}\n"
-            "성과 데이터가 비어있습니다.\n"
-        )
-        send_telegram_message(telegram_token, telegram_chat_id, message)
-
-def run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name='lstm'):
+def run_validation(best_model, settings):
     print(f"\n마지막 날짜 기준 검증 수행: {cf.VALIDATION_START_DATE} ~ {cf.VALIDATION_END_DATE}")
     validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
     validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
 
-    stock_items = get_stock_items(host, user, password, database_buy_list)
+    stock_items = get_stock_items(settings['host'], settings['user'], settings['password'], settings['database_buy_list'])
     total_stock_items = len(stock_items)
     print(f"\n전체 종목 수: {total_stock_items}")
     print(f"검증 기간: {validation_start_date} ~ {validation_end_date}")
@@ -1427,7 +991,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
 
     # 1. 마지막 날짜를 기준으로 모든 종목에 대해 한 번만 예측 수행
     validation_chunks = [validation_end_date]
-    all_predictions = load_validation_data(craw_db, stock_items, validation_chunks, best_model)
+    all_predictions = load_validation_data(settings['craw_db'], stock_items, validation_chunks, best_model)
     
     # 2. 날짜 형식 통일 및 validation 기간 내 날짜만 필터링
     if not all_predictions.empty:
@@ -1435,26 +999,24 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
         all_predictions = all_predictions[(all_predictions['date'] >= validation_start_date) & 
                                           (all_predictions['date'] <= validation_end_date)]
         
-        # 3. 날짜별로 그룹화하고 각 날짜별 상위 5개 종목만 선택
+        # 3. 날짜별로 그룹화하고 각 날짜별 상위 3개 종목만 선택
         validation_results = pd.DataFrame()
         date_groups = all_predictions.groupby(all_predictions['date'].dt.date)
         
         for date, group in date_groups:
-            # 각 날짜별로 Prediction 기준 상위 5개 종목 선택
+            # 각 날짜별로 Prediction 기준 상위 3개 종목 선택
             top_stocks = group.nlargest(3, 'Prediction')
             validation_results = pd.concat([validation_results, top_stocks], ignore_index=True)
         
-        print(f"날짜별 상위 5개 종목 필터링 후 총 결과: {len(validation_results)}개")
+        print(f"날짜별 상위 3개 종목 필터링 후 총 결과: {len(validation_results)}개")
         
-        # 4. 필터링된 날짜-종목 조합에 대해 성능 평가
-        performance_df = evaluate_performance(validation_results, craw_db)
-        
-        # 5. 결과 요약 및 전송
-        send_validation_summary(validation_results, performance_df, telegram_token, telegram_chat_id, results_table, buy_list_db, model_name)
-        
+        # 4. 결과 요약 및 전송
+        validation_utils.process_and_report_validation_results(
+            validation_results,
+            settings
+        )
     else:
         print("예측 결과가 없습니다.")
-
 
 def get_user_choice():
     while True:
@@ -1464,7 +1026,7 @@ def get_user_choice():
         else:
             print("Invalid choice. Please enter 'yes', 'new', 'continue', 'validate', 'summary', or 'no'.")
 
-def load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, current_date):
+def load_model_and_validate(settings):
     try:
         model_files = [f for f in os.listdir(model_dir) if f.endswith('.keras')]
         if model_files:
@@ -1482,7 +1044,8 @@ def load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, curr
                 model_name = os.path.basename(model_file).replace('.keras', '')
                 print(f"Using model name: {model_name}")
                 
-                run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name)
+                settings['model_name'] = model_name  # 모델 이름을 settings에 저장
+                run_validation(best_model, settings)
             else:
                 print("Invalid choice. Exiting.")
         else:
@@ -1490,45 +1053,7 @@ def load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, curr
     except Exception as e:
         print(f"Error loading model: {e}")
 
-
-def process_validation_results(validation_results, settings, model):
-    """검증 결과를 처리합니다."""
-    if validation_results.empty:
-        print("No validation results to process.")
-        return
-    
-    # 데이터프레임 생성 시 컬럼 지정
-    results_df = pd.DataFrame(validation_results, columns=['code_name', 'date', 'confidence', 'action', 'max_profit_rate', 'max_loss_rate', 'max_profit_date', 'max_loss_date', 'estimated_profit_rate'])
-    
-    # 필요한 컬럼이 있는지 확인
-    required_columns = ['code_name', 'date', 'confidence', 'action', 'max_profit_rate', 'max_loss_rate']
-    for col in required_columns:
-        if col not in results_df.columns:
-            print(f"경고: {col} 컬럼이 결과 데이터프레임에 없습니다. 0으로 채웁니다.")
-            results_df[col] = 0.0  # 또는 적절한 기본값
-    
-    # 신뢰도 기준으로 정렬
-    results_df = results_df.sort_values(by='confidence', ascending=False)
-    
-    # 결과 필터링 및 추출
-    filtered_results = filter_validation_results(results_df)
-    
-    # 필터링 결과 출력 및 텔레그램 전송
-    print_validation_summary(results_df, filtered_results, settings)
-    
-    # 결과 저장
-    save_validation_results(filtered_results, settings)
-    
-    # deep_learning 테이블에도 결과 저장 (추가된 부분)
-    save_results_to_deep_learning_table(filtered_results, settings)
-    
-    # 매일 상위 3개 종목 성과 계산 및 출력
-    top3_performance = calculate_top3_performance(results_df, settings['craw_db'])
-    if top3_performance is not None:
-        print("\n매일 상위 3개 종목 성과:")
-        print(top3_performance)
-
-def process_model_workflow(filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id):
+def process_model_workflow(filtered_results, settings):
     """사용자 선택에 따라 모델 훈련, 계속 훈련, 검증 또는 모델 요약을 수행합니다."""
     print("Filtered stock results loaded successfully")
     
@@ -1545,7 +1070,7 @@ def process_model_workflow(filtered_results, buy_list_db, craw_db, model_dir, re
             filtered_results = select_stocks_for_training(filtered_results)
             
         # 새로운 모델을 훈련할 때 기존 체크포인트를 무시
-        process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id)
+        process_filtered_results(filtered_results, settings)
     
     elif choice == 'continue':
         # 종목 선택 기능 추가
@@ -1574,27 +1099,26 @@ def process_model_workflow(filtered_results, buy_list_db, craw_db, model_dir, re
         
                         # process_filtered_results 대신 continue_training_from_checkpoint 호출
                         best_model = continue_training_from_checkpoint(
-                            checkpoint, selected_filtered_results, buy_list_db, craw_db, 
-                            model_dir, results_table, current_date, telegram_token, telegram_chat_id
+                            checkpoint, selected_filtered_results, settings
                         )
                         
                         # 훈련 후 검증 실행
-                        run_validation(best_model, buy_list_db, craw_db, results_table, current_date)
+                        run_validation(best_model, settings)
                     else:
                         print("Failed to load checkpoint. Starting new training.")
-                        process_filtered_results(selected_filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id)
+                        process_filtered_results(selected_filtered_results, settings)
                 else:
                     print("Invalid choice. Starting new training.")
-                    process_filtered_results(selected_filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id)
+                    process_filtered_results(selected_filtered_results, settings)
             except ValueError:
                 print("Invalid input. Starting new training.")
-                process_filtered_results(selected_filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id)
+                process_filtered_results(selected_filtered_results, settings)
         else:
             print("No checkpoint files found. Starting new training.")
-            process_filtered_results(selected_filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id)
+            process_filtered_results(selected_filtered_results, settings)
     
     elif choice == 'validate':
-        load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, current_date)
+        load_model_and_validate(settings)
     
     elif choice == 'no':
         print("Exiting without training.")
@@ -1648,10 +1172,10 @@ def load_data_for_lstm(db_manager, start_date, end_date):
         
         # 각 종목별 데이터 로드 및 가공
         for i, row in tqdm(enumerate(stock_items.itertuples()), total=len(stock_items), desc="데이터 로드"):
-            code_name = row.code_name
+            stock_name = row.stock_name
             
             # 일별 데이터 로드
-            df = load_daily_craw_data(db_manager, code_name, start_date, end_date)
+            df = load_daily_craw_data(db_manager, stock_name, start_date, end_date)
             
             if not df.empty and len(df) >= 250:
                 # 특성 추출
@@ -1659,7 +1183,7 @@ def load_data_for_lstm(db_manager, start_date, end_date):
                 
                 if not df_features.empty:
                     # 필요한 경우 라벨 추가
-                    df_features['stock_code'] = code_name
+                    df_features['stock_name'] = stock_name
                     all_data.append(df_features)
             
             # 메모리 관리를 위한 정리
@@ -1779,14 +1303,14 @@ def split_and_extract_groups(df_labeled):
         traceback.print_exc()
         return pd.DataFrame()
 
-def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id):
+def process_filtered_results(filtered_results, settings):
     """필터링된 종목 결과를 처리하여 LSTM 모델을 훈련합니다."""
     if not filtered_results.empty:
         trained_models = []
         best_model = None
         
         # 종목별로 데이터 로드 및 처리
-        unique_codes = filtered_results['code_name'].unique()
+        unique_codes = filtered_results['stock_name'].unique()
         total_codes = len(unique_codes)
         print(f"Total unique stock codes: {total_codes}")
         
@@ -1795,40 +1319,40 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
         for batch_idx in range(0, total_codes, batch_size):
             batch_codes = unique_codes[batch_idx:batch_idx + batch_size]
             
-            for code_name in tqdm(batch_codes, desc=f"Processing batch {batch_idx//batch_size + 1}"):
+            for stock_name in tqdm(batch_codes, desc=f"Processing batch {batch_idx//batch_size + 1}"):
                 # 코드명에 해당하는 신호 데이터 필터링
-                stock_signals = filtered_results[filtered_results['code_name'] == code_name]
-                print(f"\nProcessing {code_name} ({batch_idx + list(batch_codes).index(code_name) + 1}/{total_codes}): {len(stock_signals)} signals")
+                stock_signals = filtered_results[filtered_results['stock_name'] == stock_name]
+                print(f"\nProcessing {stock_name} ({batch_idx + list(batch_codes).index(stock_name) + 1}/{total_codes}): {len(stock_signals)} signals")
                 
                 # 해당 종목의 데이터 로드 및 라벨링
-                df_labeled = load_stock_data_for_signals(craw_db, stock_signals, code_name)
+                df_labeled = load_stock_data_for_signals(settings['craw_db'], stock_signals, stock_name)
                 
                 if not df_labeled.empty:
                     # 그룹으로 나누고 500봉 데이터 추출
                     df_500 = split_and_extract_groups(df_labeled)
-                    print(f"Data loaded for {code_name}: {len(df_500)} rows")
+                    print(f"Data loaded for {stock_name}: {len(df_500)} rows")
                     
                     # 메모리 확보를 위해 필요없는 데이터 삭제
                     del df_labeled
                     
                     # LSTM 모델 훈련
-                    current_idx = batch_idx + list(batch_codes).index(code_name)
-                    best_model = train_improved_lstm_model(df_500, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id, code_name, current_idx, total_codes)
+                    current_idx = batch_idx + list(batch_codes).index(stock_name)
+                    best_model = train_improved_lstm_model(df_500, settings, stock_name, current_idx, total_codes)
                     
                     # 메모리 확보를 위해 필요없는 데이터 삭제
                     # del df_500
                     
                     if best_model is not None:
-                        trained_models.append(code_name)
-                        print(f"Model training successful for {code_name}")
+                        trained_models.append(stock_name)
+                        print(f"Model training successful for {stock_name}")
                         
                         # 배치의 마지막 종목이거나 전체의 마지막 종목이면 모델 저장
-                        current_idx = batch_idx + list(batch_codes).index(code_name)
+                        current_idx = batch_idx + list(batch_codes).index(stock_name)
                         
                         if (current_idx + 1) % 10 == 0 or current_idx == total_codes - 1:
                             # 이전 중간 저장 파일 삭제
                             for old_file in os.listdir(model_dir):
-                                if old_file.startswith("improved_lstm_model_batch_") and old_file.endswith(f"_{current_date}.keras"):
+                                if old_file.startswith("improved_lstm_model_batch_") and old_file.endswith(f"_{settings['current_date']}.keras"):
                                     try:
                                         os.remove(os.path.join(model_dir, old_file))
                                         print(f"Removed previous checkpoint file: {old_file}")
@@ -1837,7 +1361,7 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
                             
                             # 새 모델 저장 - 타임스탬프 추가
                             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                            model_file = os.path.join(model_dir, f"improved_lstm_model_batch_{len(trained_models)}_{current_date}_{timestamp}.keras")
+                            model_file = os.path.join(model_dir, f"improved_lstm_model_batch_{len(trained_models)}_{settings['current_date']}_{timestamp}.keras")
                             best_model.save(model_file)
                             print(f"Model saved to {model_file} after processing {len(trained_models)} stocks")
                             
@@ -1845,18 +1369,18 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
                             checkpoint_state = {
                                 'model': best_model,
                                 'trained_models': trained_models.copy(),
-                                'current_date': current_date
+                                'current_date': settings['current_date']
                             }
-                            save_training_checkpoint(checkpoint_state, f"training_checkpoint_{current_date}.pkl")
+                            save_training_checkpoint(checkpoint_state, f"training_checkpoint_{settings['current_date']}.pkl")
                             
                             # 텔레그램 메시지
                             message = f"중간 저장 완료: {len(trained_models)}개 종목 처리 ({current_idx+1}/{total_codes})"
-                            send_telegram_message(telegram_token, telegram_chat_id, message)
+                            send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
                             
                     else:
-                        print(f"Model training failed for {code_name}")
+                        print(f"Model training failed for {stock_name}")
                 else:
-                    print(f"No labeled data found for {code_name}")
+                    print(f"No labeled data found for {stock_name}")
                 
                 # 적극적인 메모리 정리
                 clear_memory()
@@ -1868,6 +1392,7 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
             
         # 훈련 완료 후...
 
+
 def print_model_summary(model):
     """모델의 요약 정보를 출력합니다."""
     if model is not None:
@@ -1876,7 +1401,7 @@ def print_model_summary(model):
     else:
         print("No model available to summarize.")
 
-def continue_training_from_checkpoint(checkpoint, filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id):
+def continue_training_from_checkpoint(checkpoint, filtered_results, settings):
     """이미 학습된 모델을 사용하여 훈련을 계속합니다."""
     print("Continuing training from checkpoint...")
     
@@ -1888,21 +1413,21 @@ def continue_training_from_checkpoint(checkpoint, filtered_results, buy_list_db,
         trained_models = already_trained_models.copy()  # 이미 훈련된 모델 목록으로 시작
         
         # 종목별로 데이터 로드 및 처리
-        unique_codes = filtered_results['code_name'].unique()
+        unique_codes = filtered_results['stock_name'].unique()
         total_codes = len(unique_codes)
         
-        for idx, code_name in enumerate(tqdm(unique_codes, desc="Processing stocks")):
+        for idx, stock_name in enumerate(tqdm(unique_codes, desc="Processing stocks")):
             # 이미 훈련된 모델은 건너뛰기
-            if code_name in already_trained_models:
-                print(f"Skipping already trained model: {code_name}")
+            if stock_name in already_trained_models:
+                print(f"Skipping already trained model: {stock_name}")
                 continue
             
             # 코드명에 해당하는 신호 데이터 필터링
-            stock_signals = filtered_results[filtered_results['code_name'] == code_name]
-            print(f"\nProcessing {code_name} ({idx+1}/{total_codes}): {len(stock_signals)} signals")
+            stock_signals = filtered_results[filtered_results['stock_name'] == stock_name]
+            print(f"\nProcessing {stock_name} ({idx+1}/{total_codes}): {len(stock_signals)} signals")
             
             # 해당 종목의 데이터 로드 및 라벨링
-            df_labeled = load_stock_data_for_signals(craw_db, stock_signals, code_name)
+            df_labeled = load_stock_data_for_signals(settings['craw_db'], stock_signals, stock_name)
             
             if not df_labeled.empty:
                 # 그룹으로 나누고 500봉 데이터 추출
@@ -1910,24 +1435,24 @@ def continue_training_from_checkpoint(checkpoint, filtered_results, buy_list_db,
                 
                 # `df_500`이 None 또는 빈 데이터프레임인 경우 처리
                 if df_500 is None or df_500.empty:
-                    print(f"⚠️ Insufficient data for {code_name}. Skipping this stock.")
+                    print(f"⚠️ Insufficient data for {stock_name}. Skipping this stock.")
                     continue
                 
-                print(f"Data loaded for {code_name}: {len(df_500)} rows")
+                print(f"Data loaded for {stock_name}: {len(df_500)} rows")
                 
                 # LSTM 모델 훈련
-                new_model = train_continued_lstm_model(df_500, best_model, code_name, idx, total_codes)
+                new_model = train_continued_lstm_model(df_500, best_model, stock_name, idx, total_codes)
                 if new_model is not None:
                     # 이전 모델을 새 모델로 업데이트
                     best_model = new_model
-                    trained_models.append(code_name)
-                    print(f"Model training successful for {code_name}")
+                    trained_models.append(stock_name)
+                    print(f"Model training successful for {stock_name}")
                     
                     # 10개 종목마다 또는 마지막 종목이면 모델 저장
                     if ((len(trained_models) - len(already_trained_models)) % 10 == 0) or (idx == total_codes - 1):
                         # 이전 중간 저장 파일 삭제
                         for old_file in os.listdir(model_dir):
-                            if old_file.startswith("improved_lstm_model_continued_") and old_file.endswith(f"_{current_date}.keras"):
+                            if old_file.startswith("improved_lstm_model_continued_") and old_file.endswith(f"_{settings['current_date']}.keras"):
                                 try:
                                     os.remove(os.path.join(model_dir, old_file))
                                     print(f"Removed previous checkpoint file: {old_file}")
@@ -1936,7 +1461,7 @@ def continue_training_from_checkpoint(checkpoint, filtered_results, buy_list_db,
                         
                         # 새 모델 저장 - 타임스탬프 추가
                         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        model_file = os.path.join(model_dir, f"improved_lstm_model_continued_{len(trained_models)}_{current_date}_{timestamp}.keras")
+                        model_file = os.path.join(model_dir, f"improved_lstm_model_continued_{len(trained_models)}_{settings['current_date']}_{timestamp}.keras")
                         best_model.save(model_file)
                         print(f"Model saved to {model_file} after processing {len(trained_models)} stocks")
                         
@@ -1944,24 +1469,25 @@ def continue_training_from_checkpoint(checkpoint, filtered_results, buy_list_db,
                         checkpoint_state = {
                             'model': best_model,
                             'trained_models': trained_models.copy(),
-                            'current_date': current_date
+                            'current_date': settings['current_date']
                         }
-                        save_training_checkpoint(checkpoint_state, f"training_checkpoint_{current_date}.pkl")
+                        save_training_checkpoint(checkpoint_state, f"training_checkpoint_{settings['current_date']}.pkl")
                         
                         # 텔레그램 메시지
                         message = f"중간 저장 완료: {len(trained_models)}개 종목 처리 ({idx+1}/{total_codes})"
-                        send_telegram_message(telegram_token, telegram_chat_id, message)
+                        send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
                 else:
-                    print(f"Model training failed for {code_name}")
+                    print(f"Model training failed for {stock_name}")
             else:
-                print(f"No labeled data found for {code_name}")
+                print(f"No labeled data found for {stock_name}")
         
         # 훈련 완료 후 한 번만 텔레그램 메시지 전송
         if len(trained_models) > len(already_trained_models):
             message = f"모델 추가 훈련 완료: {len(trained_models)}개 종목 ({', '.join(trained_models[:5])}{'...' if len(trained_models) > 5 else ''})"
-            send_telegram_message(telegram_token, telegram_chat_id, message)
+            send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
     
     return best_model
+
 
 def extract_features(df):
     try:
@@ -2081,31 +1607,40 @@ def extract_features(df):
         traceback.print_exc()
         return pd.DataFrame()
 
-# 메인 코드에서 filtered_results 데이터프레임에 필요한 열들이 포함되어 있는지 확인
 if __name__ == '__main__':
+    # 현재 날짜 정의
+    current_date = datetime.now().strftime('%Y%m%d')
+    
+    # DBConnectionManager 인스턴스 생성
     host = cf.MYSQL_HOST
     user = cf.MYSQL_USER
     password = cf.MYSQL_PASSWORD
     database_buy_list = cf.MYSQL_DATABASE_BUY_LIST
     database_craw = cf.MYSQL_DATABASE_CRAW
-    results_table = cf.DENSE_UPDOWN_RESULTS_TABLE  # finding & training table
-  # finding & training table
-    performance_table = cf.LSTM_PERFORMANCE_TABLE  # 성능 결과를 저장할 테이블 이름
-    # 텔레그램 설정
-    telegram_token = cf.TELEGRAM_BOT_TOKEN
-    telegram_chat_id = cf.TELEGRAM_CHAT_ID
     
-    # 현재 날짜 정의
-    current_date = datetime.now().strftime('%Y%m%d')
-    
-    # DBConnectionManager 인스턴스 생성
     buy_list_db = DBConnectionManager(host, user, password, database_buy_list)
     craw_db = DBConnectionManager(host, user, password, database_craw)
     
+    # 설정 dictionary 생성
+    settings = {
+        'host': host,
+        'user': user,
+        'password': password,
+        'database_buy_list': database_buy_list,
+        'database_craw': database_craw,
+        'results_table': cf.DENSE_UPDOWN_RESULTS_TABLE,
+        'performance_table': cf.LSTM_PERFORMANCE_TABLE,
+        'telegram_token': cf.TELEGRAM_BOT_TOKEN,
+        'telegram_chat_id': cf.TELEGRAM_CHAT_ID,
+        'current_date': current_date,
+        'buy_list_db': buy_list_db,
+        'craw_db': craw_db
+    }
+    
     # Load filtered stock results (찾아놓은 패턴 결과)
-    filtered_results = load_filtered_stock_results(buy_list_db, results_table)
+    filtered_results = load_filtered_stock_results(buy_list_db, settings['results_table'])
     # workflow 실행
-    process_model_workflow(filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id)    
+    process_model_workflow(filtered_results, settings)    
     # DB 연결 해제
     buy_list_db.close()
     craw_db.close()

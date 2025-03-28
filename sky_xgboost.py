@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from stock_utils import get_stock_items  # get_stock_items 함수를 가져옵니다.
+from stock_utils import get_stock_items, load_daily_craw_data
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
@@ -405,55 +405,24 @@ def load_filtered_stock_results(db_manager, table):
     try:
         query = f"SELECT * FROM {table}"
         df = db_manager.execute_query(query)
+        
+        # 날짜 열이 있는지 확인하고, 자동 변환되지 않은 경우에만 변환
+        date_columns = ['signal_date', 'start_date', 'date']
+        for col in date_columns:
+            if col in df.columns:
+                # 이미 datetime 타입인지 확인
+                if not pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df[col] = pd.to_datetime(df[col]).dt.date  # datetime.date로 변환
+                else:
+                    # 이미 datetime 타입이면 datetime.date로 변환
+                    df[col] = df[col].dt.date
+                print(f"Column '{col}' type: {df[col].dtype}, sample: {df[col].iloc[0] if not df.empty else 'N/A'}")
+        
         return df
     except Exception as e:
         print(f"Error loading data from MySQL: {e}")
         return pd.DataFrame()
 
-def load_daily_craw_data(db_manager, table, start_date, end_date):
-    try:
-        # 날짜 객체를 MySQL의 yyyymmdd 형식 문자열로 변환
-        if isinstance(start_date, datetime.date):
-            start_date_str = start_date.strftime('%Y%m%d')
-        else:
-            # 이미 문자열인 경우 형식 확인 및 변환
-            if '-' in str(start_date):
-                # yyyy-mm-dd 형식을 datetime으로 변환 후 다시 yyyymmdd로
-                start_date_str = pd.to_datetime(start_date).strftime('%Y%m%d')
-            else:
-                # 이미 yyyymmdd 형식이면 그대로 사용
-                start_date_str = str(start_date)
-        
-        if isinstance(end_date, datetime.date):
-            end_date_str = end_date.strftime('%Y%m%d')
-        else:
-            if '-' in str(end_date):
-                end_date_str = pd.to_datetime(end_date).strftime('%Y%m%d')
-            else:
-                end_date_str = str(end_date)
-        
-        print(f"Loading data from {start_date_str} to {end_date_str} for table {table}")
-        
-        query = f"""
-            SELECT * FROM `{table}`
-            WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
-            ORDER BY date ASC
-        """
-        
-        df = db_manager.execute_query(query)
-        
-        # 날짜 열을 datetime 형식으로 변환
-        if 'date' in df.columns and not df.empty:
-            # MySQL에서 가져온 'date' 열이 yyyymmdd 형식의 문자열 또는 숫자로 되어 있을 것
-            df['date'] = pd.to_datetime(df['date'].astype(str), format='%Y%m%d')
-        
-        print(f"Data loaded from {start_date_str} to {end_date_str} for table {table}: {len(df)} rows")
-        return df
-    except Exception as e:
-        print(f"Error loading data from MySQL: {e}")
-        import traceback
-        traceback.print_exc()
-        return pd.DataFrame()
 
 def extract_features(df, COLUMNS_CHART_DATA):
     try:
@@ -962,6 +931,31 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         traceback.print_exc()
         return None
 
+def parse_date_flexible(date_str_or_obj):
+    """다양한 형식의 날짜를 datetime.date 객체로 변환"""
+    try:
+        if pd.isna(date_str_or_obj):
+            return None
+        
+        if isinstance(date_str_or_obj, pd.Timestamp):
+            return date_str_or_obj.date()
+        elif isinstance(date_str_or_obj, datetime):
+            return date_str_or_obj.date()
+        elif isinstance(date_str_or_obj, str):
+            # 하이픈이 있는지 확인
+            if '-' in date_str_or_obj:
+                # YYYY-MM-DD 형식
+                return pd.to_datetime(date_str_or_obj.strip()).date()
+            else:
+                # YYYYMMDD 형식
+                return pd.to_datetime(date_str_or_obj.strip(), format='%Y%m%d').date()
+        else:
+            print(f"Unsupported date type: {type(date_str_or_obj)}")
+            return None
+    except Exception as e:
+        print(f"Error parsing date '{date_str_or_obj}': {e}")
+        return None
+
 
 def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_method='recall', checkpoint_interval=10):
     """XGBoost 모델을 훈련합니다. 중간에 체크포인트를 저장하고 이어서 훈련할 수 있습니다."""
@@ -970,36 +964,21 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     telegram_token = settings['telegram_token']
     telegram_chat_id = settings['telegram_chat_id']
     
-    # 1. 먼저 best_model_checkpoint 로드 시도
-    best_checkpoint_data, best_checkpoint_exists = load_checkpoint_split(settings, 'best_model_checkpoint')
-    
-    # 2. 기본 training_checkpoint 로드 시도
-    regular_checkpoint_data, regular_checkpoint_exists = load_checkpoint_split(settings)
-    
-    # 체크포인트 데이터 초기화 또는 로드 (최고 모델 우선)
-    if best_checkpoint_exists:
-        print("✓ 최고 성능 모델 체크포인트 발견! 이 체크포인트로 재개합니다.")
-        checkpoint_data = best_checkpoint_data
-        checkpoint_exists = True
-    elif regular_checkpoint_exists:
-        print("◎ 일반 체크포인트만 발견됨. 이 체크포인트로 재개합니다.")
-        checkpoint_data = regular_checkpoint_data
-        checkpoint_exists = True
-    else:
-        print("✗ 체크포인트를 찾을 수 없습니다. 처음부터 시작합니다.")
-        checkpoint_exists = False
-        checkpoint_data = None
-    
-    # 체크포인트에서 데이터 로드
+    # 체크포인트 데이터 초기화 또는 로드
+    checkpoint_data, checkpoint_exists = load_checkpoint_split(settings)
+
     if checkpoint_exists:
+        # 최고 성능 모델 정보
         best_model = checkpoint_data.get('best_model')
         best_f1 = checkpoint_data.get('best_f1', 0)
         best_weighted_f1 = checkpoint_data.get('best_weighted_f1', 0)
         best_threshold = checkpoint_data.get('best_threshold', 0.5)
+        
+        # 진행 상태 정보
         processed_items = set(checkpoint_data.get('processed_items', []))
         total_models = checkpoint_data.get('total_models', 0)
         successful_models = checkpoint_data.get('successful_models', 0)
-        first_stock = checkpoint_data.get('first_stock', False)
+        last_processed_item = checkpoint_data.get('last_processed_item', None)
         
         # 디버깅 정보 출력
         print(f"\n로드된 체크포인트 정보:")
@@ -1008,20 +987,20 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         print(f"  - 최고 가중 F1 점수: {best_weighted_f1:.4f}")
         print(f"  - 총 모델 수: {total_models}")
         print(f"  - 성공 모델 수: {successful_models}")
-    
+        print(f"  - 마지막 처리된 종목: {last_processed_item}")
     else:
-        # 첫 번째 종목에 대해서만 use_saved_params를 False로 설정
-        first_stock = True
+        # 체크포인트가 없는 경우 기본값 초기화
         best_model = None
         best_f1 = 0
-        best_weighted_f1 = 0 
-        best_threshold = 0.5  # 기본 임계값
+        best_weighted_f1 = 0
+        best_threshold = 0.5
+        processed_items = set()
         total_models = 0
         successful_models = 0
-        processed_items = set()
+        last_processed_item = None
     
     # 종목별로 그룹화
-    grouped_results = filtered_results.groupby('code_name')
+    grouped_results = filtered_results.groupby('stock_name')
     
     # 총 처리할 종목 수 계산
     total_items = len(grouped_results)
@@ -1032,37 +1011,36 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     item_updates = []
     last_telegram_time = time.time()
     
-    # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
-    for code_name, group in tqdm(grouped_results, desc="Training models"):
+    for stock_name, group in tqdm(grouped_results, desc="Training models"):
         # 이미 처리한 항목 건너뛰기
-        item_id = code_name
-        if item_id in processed_items:
-            print(f"이미 처리된 종목 건너뛰기: {code_name}")
-            items_processed += 1
+        if stock_name in processed_items:
+            print(f"이미 처리된 종목 건너뛰기: {stock_name}")
             continue
         
-        signal_dates = group['signal_date'].tolist()
+        # 마지막 처리된 종목 이후부터 시작
+        if last_processed_item and stock_name <= last_processed_item:
+            print(f"Skipping {stock_name} (already processed or before last processed item)")
+            continue
+        
+        # 훈련 로직...
+        last_processed_item = stock_name
+
+        # 종목별 신호 날짜 가져오기
+        signal_dates = group['start_date'].tolist()
         
         # 문자열 형태의 signal_dates를 datetime 객체로 변환
         valid_signal_dates = []
         for date in signal_dates:
-            if isinstance(date, str):
-                try:
-                    # 날짜 형식 처리 (yyyy-mm-dd 또는 yyyymmdd)
-                    if '-' in date:
-                        valid_date = pd.to_datetime(date.strip()).date()
-                    else:
-                        valid_date = pd.to_datetime(date.strip(), format='%Y%m%d').date()
-                    valid_signal_dates.append(valid_date)
-                except ValueError:
-                    print(f"Invalid date format: {date}")
+            valid_date = parse_date_flexible(date)  # 유연한 날짜 변환 함수 사용
+            if valid_date:
+                valid_signal_dates.append(valid_date)
             else:
-                print(f"Invalid date type: {date}")
-    
+                print(f"Could not parse date: {date}")
+
         if not valid_signal_dates:
-            print(f"No valid signal dates for {code_name}")
+            print(f"No valid signal dates for {stock_name}")
             # 처리된 것으로 표시
-            processed_items.add(item_id)
+            processed_items.add(stock_name)
             items_processed += 1
             continue
         
@@ -1082,7 +1060,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         
         # 각 그룹별로 별도 모델 훈련
         for group_idx, signal_group in enumerate(date_groups):
-            group_id = f"{code_name}_group{group_idx}"
+            group_id = f"{stock_name}_group{group_idx}"
             
             # 이미 처리한 그룹 건너뛰기
             if group_id in processed_items:
@@ -1092,14 +1070,14 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
             end_date = max(signal_group)  # 그룹의 마지막 날짜
             start_date = end_date - timedelta(days=1200)
             
-            print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
+            print(f"\nTraining model for {stock_name} - Group {group_idx+1}: {start_date} to {end_date}")
             
             try:
-                df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
+                df = load_daily_craw_data(craw_db, stock_name, start_date, end_date)
                 
                 # 데이터가 비어있는지 확인
                 if df.empty:
-                    print(f"No data found for {code_name} between {start_date} and {end_date}. Skipping.")
+                    print(f"No data found for {stock_name} between {start_date} and {end_date}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
@@ -1108,7 +1086,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 
                 # 특성 추출 후 비어있는지 확인
                 if df.empty:
-                    print(f"Feature extraction resulted in empty DataFrame for {code_name}. Skipping.")
+                    print(f"Feature extraction resulted in empty DataFrame for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
@@ -1116,7 +1094,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 
                 # 라벨링 후 비어있는지 확인
                 if df.empty:
-                    print(f"Labeling resulted in empty DataFrame for {code_name}. Skipping.")
+                    print(f"Labeling resulted in empty DataFrame for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                 
@@ -1126,21 +1104,21 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 
                 # X 또는 y가 비어있는지 확인
                 if len(X) == 0 or len(y) == 0:
-                    print(f"X or y is empty for {code_name}. Skipping.")
+                    print(f"X or y is empty for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                 
                 # NaN 값 확인 및 처리
                 X = X.replace([np.inf, -np.inf], np.nan).dropna()
                 if X.empty:
-                    print(f"After removing NaN values, X is empty for {code_name}. Skipping.")
+                    print(f"After removing NaN values, X is empty for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
                 # 인덱스 동기화
                 y = y[X.index]
                 if len(y) == 0:
-                    print(f"After index synchronization, y is empty for {code_name}. Skipping.")
+                    print(f"After index synchronization, y is empty for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
@@ -1153,12 +1131,12 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 print(f"Test class distribution: {y_test.value_counts().sort_index()}")
                 
                 # 모델 학습
-                model = train_model(X_train, y_train, use_saved_params=(not first_stock), param_file=param_file)
+                model = train_model(X_train, y_train, use_saved_params=(not best_model), param_file=param_file)
                 
                 # 모델 평가 및 저장
                 if model:
                     # 훈련 정보 출력
-                    print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                    print(f"Model trained for {stock_name} from {start_date} to {end_date}")
                     
                     # 최적의 임계값 찾기와 모델 평가 부분을 다중 클래스 여부에 따라 분기
                     if is_multiclass(y_test, model=model):
@@ -1168,28 +1146,28 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                         if weighted_f1 > best_weighted_f1 or best_model is None:
                             best_model = model
                             best_weighted_f1 = weighted_f1
-                            print(f"\n새로운 최적 다중 클래스 모델 발견 - {code_name}")
+                            print(f"\n새로운 최적 다중 클래스 모델 발견 - {stock_name}")
                             print(f"가중 F1 점수 (클래스 중요도 반영): {best_weighted_f1:.4f}")
                             
                             # 최고 모델 업데이트 시 텔레그램 메시지 전송 (다중 클래스)
                             update_message = f"🔥 새로운 최적 다중 클래스 모델 발견!\n"
-                            update_message += f"종목: {code_name}\n"
+                            update_message += f"종목: {stock_name}\n"
                             update_message += f"가중 F1 점수: {best_weighted_f1:.4f}\n"
                             update_message += f"시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                             send_telegram_message(telegram_token, telegram_chat_id, update_message)
 
-                            # 체크포인트 저장
+                            # 각 종목 처리 후 항상 최신 상태 저장
                             checkpoint_data = {
                                 'best_model': best_model,
-                                'best_f1': best_weighted_f1,  # 다중 클래스용 점수 저장
-                                'best_weighted_f1': best_weighted_f1,  # 다중 클래스 F1 점수 추가
-                                'best_threshold': 0.5,  # 다중 클래스에서는 의미 없음
+                                'best_f1': best_f1,
+                                'best_weighted_f1': best_weighted_f1,
+                                'best_threshold': best_threshold,
                                 'processed_items': list(processed_items),
                                 'total_models': total_models,
                                 'successful_models': successful_models,
-                                'first_stock': first_stock
+                                'last_processed_item': stock_name
                             }
-                            save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
+                            save_checkpoint_split(checkpoint_data, settings, 'latest_checkpoint')
                     else:
                         # 이진 분류 모델 - 기존 코드 유지
                         if len(np.unique(y_test)) > 1:  # 테스트 세트에 클래스 1이 있는 경우만
@@ -1222,7 +1200,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                             # 혼동 행렬 계산
                             tn, fp, fn, tp = confusion_matrix(y_test, y_pred, labels=[0, 1]).ravel()
                             
-                            print(f"\n새로운 최적 모델 발견 - {code_name}")
+                            print(f"\n새로운 최적 모델 발견 - {stock_name}")
                             print(f"최적 임계값: {best_threshold:.4f}")
                             print(f"테스트 F1 점수: {best_f1:.4f}")  # F1 점수 출력
                             print(f"테스트 정확도: {accuracy:.4f}")
@@ -1233,7 +1211,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                             
                             # 최고 모델 업데이트 시 텔레그램 메시지 전송 (이진 분류)
                             update_message = f"🔥 새로운 최적 이진 분류 모델 발견!\n"
-                            update_message += f"종목: {code_name}\n"
+                            update_message += f"종목: {stock_name}\n"
                             update_message += f"F1 점수: {best_f1:.4f}\n"
                             update_message += f"임계값: {best_threshold:.4f}\n"
                             update_message += f"정확도: {accuracy:.4f}\n"
@@ -1249,7 +1227,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                                 'processed_items': list(processed_items),
                                 'total_models': total_models,
                                 'successful_models': successful_models,
-                                'first_stock': first_stock
+                                'last_processed_item': stock_name
                             }
                             save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
                     
@@ -1259,12 +1237,9 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 processed_items.add(group_id)
                 
                 # 전체 종목 처리 완료로 표시
-                processed_items.add(item_id)
+                processed_items.add(stock_name)
                 items_processed += 1
-                item_updates.append(f"{code_name} 처리 완료 ({items_processed}/{total_items})")
-                
-                # 첫 번째 종목 처리 후 플래그 변경
-                first_stock = False
+                item_updates.append(f"{stock_name} 처리 완료 ({items_processed}/{total_items})")
                 
                 # 각 종목 처리 후 항상 최신 상태 저장 (매 종목마다)
                 current_time = time.time()
@@ -1276,7 +1251,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     'processed_items': list(processed_items),
                     'total_models': total_models,
                     'successful_models': successful_models,
-                    'first_stock': first_stock,
+                    'last_processed_item': stock_name,
                     'last_saved': current_time
                 }
                 
@@ -1286,7 +1261,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     print("WARNING: 임시 체크포인트 저장 실패!")
                     
             except Exception as e:
-                print(f"Error training model for {code_name}: {e}")
+                print(f"Error training model for {stock_name}: {e}")
                 import traceback
                 traceback.print_exc()
                 
@@ -1298,7 +1273,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     'processed_items': list(processed_items),
                     'total_models': total_models,
                     'successful_models': successful_models,
-                    'first_stock': first_stock
+                    'last_processed_item': stock_name
                 }
                 save_checkpoint_split(checkpoint_data, settings, 'error_recovery_checkpoint')
         
@@ -1316,7 +1291,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     'processed_items': list(processed_items),
                     'total_models': total_models,
                     'successful_models': successful_models,
-                    'first_stock': first_stock
+                    'last_processed_item': stock_name
                 }
                 save_checkpoint_split(checkpoint_data, settings)
                 last_checkpoint_time = current_time
@@ -1403,55 +1378,89 @@ def save_checkpoint_split(checkpoint_data, settings, checkpoint_name='training_c
     checkpoint_data['best_model'] = model
     return True
 
-
 def load_checkpoint_split(settings, checkpoint_name='training_checkpoint'):
-    """분할 저장된 체크포인트를 로드합니다. 자동으로 최고 모델도 확인합니다."""
+    """분할 저장된 체크포인트를 로드합니다. 최고 모델과 최신 처리 항목을 병합합니다."""
     model_dir = settings['model_dir']
     
     # 최고 모델 체크포인트 경로
     best_meta_path = os.path.join(model_dir, "best_model_checkpoint_meta.pkl")
     best_model_path = os.path.join(model_dir, "best_model_checkpoint_model.json")
     
-    # 일반 체크포인트 경로
+    # 일반 체크포인트 경로 (최신 진행 상태)
     reg_meta_path = os.path.join(model_dir, f"{checkpoint_name}_meta.pkl")
     reg_model_path = os.path.join(model_dir, f"{checkpoint_name}_model.json")
     
-    # 최고 모델 체크포인트가 있으면 우선 로드
-    if os.path.exists(best_meta_path) and os.path.exists(best_model_path):
-        print("최고 성능 모델 체크포인트 발견. 이 체크포인트로 재개합니다.")
-        meta_path = best_meta_path
-        model_path = best_model_path
-    # 일반 체크포인트 사용
-    elif os.path.exists(reg_meta_path):
-        print("일반 체크포인트 사용")
-        meta_path = reg_meta_path
-        model_path = reg_model_path
-    else:
-        print(f"체크포인트 메타데이터를 찾을 수 없습니다.")
-        return None, False
+    best_checkpoint_data = None
+    best_checkpoint_exists = False
+    reg_checkpoint_data = None
+    reg_checkpoint_exists = False
     
-    try:
-        # 메타데이터 로드
-        checkpoint_data = joblib.load(meta_path)
-        print(f"메타데이터 로드 완료: {meta_path}")
+    # 최고 모델 체크포인트 로드 시도
+    if os.path.exists(best_meta_path):
+        try:
+            # 메타데이터 로드
+            best_checkpoint_data = joblib.load(best_meta_path)
+            best_checkpoint_exists = True
+            print(f"최고 모델 체크포인트 메타데이터 로드 완료")
+            
+            # 모델 로드 시도
+            if os.path.exists(best_model_path):
+                model = xgb.XGBClassifier()
+                model.load_model(best_model_path)
+                best_checkpoint_data['best_model'] = model
+                print(f"최고 모델 로드 완료")
+            else:
+                print(f"최고 모델 파일이 없습니다.")
+                best_checkpoint_data['best_model'] = None
+        except Exception as e:
+            print(f"최고 모델 체크포인트 로드 중 오류: {e}")
+            best_checkpoint_exists = False
+    
+    # 일반 체크포인트 로드 시도 (최신 처리 항목 정보 가져오기)
+    if os.path.exists(reg_meta_path):
+        try:
+            # 메타데이터 로드
+            reg_checkpoint_data = joblib.load(reg_meta_path)
+            reg_checkpoint_exists = True
+            print(f"일반 체크포인트 메타데이터 로드 완료")
+        except Exception as e:
+            print(f"일반 체크포인트 로드 중 오류: {e}")
+            reg_checkpoint_exists = False
+    
+    # 체크포인트 병합 로직
+    if best_checkpoint_exists and reg_checkpoint_exists:
+        print("최고 모델과 최신 진행 정보 병합 중...")
         
-        # 모델 로드 시도
-        if os.path.exists(model_path):
-            model = xgb.XGBClassifier()
-            model.load_model(model_path)
-            checkpoint_data['best_model'] = model
-            print(f"모델 로드 완료: {model_path}")
-        else:
-            print(f"모델 파일이 없습니다. 메타데이터만 로드했습니다.")
-            checkpoint_data['best_model'] = None
+        # 기본 데이터는 최신 진행 상태 체크포인트에서 가져오기
+        result_data = reg_checkpoint_data.copy()
         
-        processed_items_count = len(checkpoint_data.get('processed_items', []))
-        print(f"이미 처리된 종목 수: {processed_items_count}")
-        return checkpoint_data, True
-    except Exception as e:
-        print(f"체크포인트 로드 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
+        # 최고 성능 모델은 best_model_checkpoint에서 가져오기
+        result_data['best_model'] = best_checkpoint_data.get('best_model', None)
+        result_data['best_f1'] = best_checkpoint_data.get('best_f1', 0)
+        result_data['best_weighted_f1'] = best_checkpoint_data.get('best_weighted_f1', 0)
+        result_data['best_threshold'] = best_checkpoint_data.get('best_threshold', 0.5)
+        
+        # 처리된 항목 목록은 두 체크포인트의 합집합 사용
+        best_processed = set(best_checkpoint_data.get('processed_items', []))
+        reg_processed = set(reg_checkpoint_data.get('processed_items', []))
+        combined_processed = best_processed.union(reg_processed)
+        
+        print(f"최고 모델 처리 항목: {len(best_processed)}개")
+        print(f"최신 상태 처리 항목: {len(reg_processed)}개")
+        print(f"병합 후 처리 항목: {len(combined_processed)}개")
+        
+        # 처리된 항목 리스트 업데이트
+        result_data['processed_items'] = list(combined_processed)
+        
+        return result_data, True
+    elif reg_checkpoint_exists:
+        print("일반 체크포인트만 사용합니다.")
+        return reg_checkpoint_data, True
+    elif best_checkpoint_exists:
+        print("최고 성능 모델 체크포인트만 사용합니다.")
+        return best_checkpoint_data, True
+    else:
+        print("체크포인트가 없습니다. 처음부터 시작합니다.")
         return None, False
 
 
@@ -1461,28 +1470,10 @@ def label_data(df, signal_dates):
         
         # 기본 라벨을 0으로 설정
         df['Label'] = 0
-        df['date'] = pd.to_datetime(df['date']).dt.date  # 날짜 형식을 datetime.date로 변환
-        
-        # signal_dates를 datetime.date 형식으로 변환
         valid_signal_dates = []
         for date in signal_dates:
-            try:
-                # MySQL에서는 yyyymmdd 형식으로 저장됨
-                if isinstance(date, str):
-                    # 하이픈이 있는지 확인하여 형식 구분
-                    if '-' in date:
-                        # yyyy-mm-dd 형식인 경우
-                        valid_date = pd.to_datetime(date).date()
-                    else:
-                        # yyyymmdd 형식인 경우
-                        valid_date = pd.to_datetime(date, format='%Y%m%d').date()
-                else:
-                    # 이미 datetime 객체인 경우
-                    valid_date = date if isinstance(date, datetime.date) else pd.to_datetime(date).date()
-                valid_signal_dates.append(valid_date)
-            except ValueError as e:
-                print(f"Invalid date format: {date}, Error: {e}")
-        
+            valid_signal_dates.append(date)
+
         # 날짜 정렬
         valid_signal_dates.sort()
         print(f'Signal dates: {valid_signal_dates}')
@@ -1492,11 +1483,11 @@ def label_data(df, signal_dates):
                 # 1. signal_date를 기준으로 라벨 2 설정
                 df.loc[df['date'] == signal_date, 'Label'] = 2
                 
-                # 2. signal_date 이후 7일 동안 종가가 signal_date 종가의 105% 이하인 경우 라벨 2로 설정
+                # 2. signal_date 이후 7일 동안 종가가 signal_date 종가의 5% 이하인 경우 라벨 2로 설정
                 signal_rows = df[df['date'] == signal_date]
                 if not signal_rows.empty:
                     signal_close = signal_rows['close'].values[0]
-                    threshold = signal_close * 1.05  # 105% 이하
+                    threshold = signal_close * 1.05  # 5% 이하
                     date_range = (df['date'] > signal_date) & (df['date'] <= signal_date + timedelta(days=7))
                     df.loc[date_range & (df['close'] <= threshold), 'Label'] = 2
                 
@@ -1720,7 +1711,7 @@ def optimize_threshold(model, X_val, y_val, metric='f1'):
     
     return best_threshold
 
-def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
+def predict_pattern(model, df, stock_name, use_data_dates=False, settings=None):
     """패턴을 예측하고 결과를 반환합니다."""
     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
@@ -1729,7 +1720,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
         
         # 1. 데이터 전처리
         X = df[COLUMNS_TRAINING_DATA].copy()
@@ -1737,7 +1728,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
         
         if X.empty:
             print("No valid data for prediction after preprocessing.")
-            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
         
         # 2. 클래스 예측
         predictions = model.predict(X)
@@ -1779,17 +1770,17 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             # 날짜 열이 있는지 확인
             if 'date' not in result_df.columns:
                 print("Warning: 'date' column not found in dataframe")
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
             # 문자열 날짜를 datetime으로 변환
             if isinstance(result_df['date'].iloc[0], str):
                 result_df['date'] = pd.to_datetime(result_df['date'])
-            
+
             # NaT 값 제거
             result_df = result_df.dropna(subset=['date'])
             if result_df.empty:
                 print("No valid dates found in data.")
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
             print(f"Date range in data: {result_df['date'].min()} to {result_df['date'].max()}")
             
@@ -1812,8 +1803,8 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             print(f'Patterns with value > 0: {len(positive_patterns)} matches found')
             
             if positive_patterns.empty:
-                print(f"No positive patterns found for {stock_code}")
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                print(f"No positive patterns found for {stock_name}")
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
             # 검증 기간 내 필터링
             recent_patterns = positive_patterns[
@@ -1825,14 +1816,14 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             
             # 8. 최종 결과 반환
             if not recent_patterns.empty:
-                recent_patterns['stock_code'] = stock_code
-                final_result = recent_patterns[['date', 'stock_code', 'confidence']]
-                print(f'Found patterns for {stock_code} with confidence:')
+                recent_patterns['stock_name'] = stock_name
+                final_result = recent_patterns[['date', 'stock_name', 'confidence']]
+                print(f'Found patterns for {stock_name} with confidence:')
                 print(final_result)
                 return final_result
             else:
-                print(f'No patterns found for {stock_code} in validation period')
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                print(f'No patterns found for {stock_name} in validation period')
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
                 
         except Exception as e:
             print(f"Error in date processing: {e}")
@@ -1841,14 +1832,14 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             print(f"Debug info - date types: df={type(result_df['date'].iloc[0])}, start={type(validation_start_date)}")
             import traceback
             traceback.print_exc()
-            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
     except Exception as e:
         print(f'Error predicting patterns: {e}')
         print(f'Error type: {type(e).__name__}')
         import traceback
         print(f'Stack trace:\n{traceback.format_exc()}')
-        return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+        return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
 
 def evaluate_performance(df, performance_start_date, performance_end_date):
     try:
@@ -1886,7 +1877,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
             deep_learning_data.append({
                 'date': row['pattern_date'],
                 'method': model_name,
-                'code_name': row['stock_code'],
+                'stock_name': row['stock_name'],
                 'confidence': round(row['confidence'], 4),
                 'estimated_profit_rate': round(row['max_return'] - abs(row['max_loss']), 2)
             })
@@ -1919,20 +1910,20 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     performance_results = []
     
     for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
-        code_name = row['stock_code']
+        stock_name = row['stock_name']
         pattern_date = row['date']
         confidence = row.get('confidence', 0)  # confidence 값 가져오기
         performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
         performance_end_date = performance_start_date + pd.Timedelta(days=60)
         
-        df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
-        print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
+        df = load_daily_craw_data(craw_db, stock_name, performance_start_date, performance_end_date)
+        print(f"Evaluating performance for {stock_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
         
         # 데이터가 없는 경우에도 결과에 포함 (마지막 날짜 처리를 위함)
         if df.empty:
-            print(f"No data available for {code_name} after {pattern_date}. Including with 0 return.")
+            print(f"No data available for {stock_name} after {pattern_date}. Including with 0 return.")
             performance_results.append({
-                'stock_code': code_name,
+                'stock_name': stock_name,
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
@@ -1945,10 +1936,10 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             # None이 반환되는 경우에도 0으로 처리하여 포함
             if estimated_profit_rate is None:
                 estimated_profit_rate = 0.0
-                print(f"No valid return found for {code_name}. Using 0 instead.")
+                print(f"No valid return found for {stock_name}. Using 0 instead.")
                 
             performance_results.append({
-                'stock_code': code_name,
+                'stock_name': stock_name,
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
@@ -1989,7 +1980,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     try:
         # DataFrame을 문자열로 변환
         # Select the desired columns
-        selected_columns = performance_df[['pattern_date', 'stock_code', 'confidence','estimated_profit_rate']]
+        selected_columns = performance_df[['pattern_date', 'stock_name', 'confidence','estimated_profit_rate']]
         # Convert to string
         message = selected_columns.to_string(index=False)
         
@@ -2183,36 +2174,21 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     telegram_token = settings['telegram_token']
     telegram_chat_id = settings['telegram_chat_id']
     
-    # 1. 먼저 best_model_checkpoint 로드 시도
-    best_checkpoint_data, best_checkpoint_exists = load_checkpoint_split(settings, 'best_model_checkpoint')
-    
-    # 2. 기본 training_checkpoint 로드 시도
-    regular_checkpoint_data, regular_checkpoint_exists = load_checkpoint_split(settings)
-    
-    # 체크포인트 데이터 초기화 또는 로드 (최고 모델 우선)
-    if best_checkpoint_exists:
-        print("✓ 최고 성능 모델 체크포인트 발견! 이 체크포인트로 재개합니다.")
-        checkpoint_data = best_checkpoint_data
-        checkpoint_exists = True
-    elif regular_checkpoint_exists:
-        print("◎ 일반 체크포인트만 발견됨. 이 체크포인트로 재개합니다.")
-        checkpoint_data = regular_checkpoint_data
-        checkpoint_exists = True
-    else:
-        print("✗ 체크포인트를 찾을 수 없습니다. 처음부터 시작합니다.")
-        checkpoint_exists = False
-        checkpoint_data = None
-    
-    # 체크포인트에서 데이터 로드
+    # 체크포인트 데이터 초기화 또는 로드
+    checkpoint_data, checkpoint_exists = load_checkpoint_split(settings)
+
     if checkpoint_exists:
+        # 최고 성능 모델 정보
         best_model = checkpoint_data.get('best_model')
         best_f1 = checkpoint_data.get('best_f1', 0)
         best_weighted_f1 = checkpoint_data.get('best_weighted_f1', 0)
         best_threshold = checkpoint_data.get('best_threshold', 0.5)
+        
+        # 진행 상태 정보
         processed_items = set(checkpoint_data.get('processed_items', []))
         total_models = checkpoint_data.get('total_models', 0)
         successful_models = checkpoint_data.get('successful_models', 0)
-        first_stock = checkpoint_data.get('first_stock', False)
+        last_processed_item = checkpoint_data.get('last_processed_item', None)
         
         # 디버깅 정보 출력
         print(f"\n로드된 체크포인트 정보:")
@@ -2221,20 +2197,20 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         print(f"  - 최고 가중 F1 점수: {best_weighted_f1:.4f}")
         print(f"  - 총 모델 수: {total_models}")
         print(f"  - 성공 모델 수: {successful_models}")
-    
+        print(f"  - 마지막 처리된 종목: {last_processed_item}")
     else:
-        # 첫 번째 종목에 대해서만 use_saved_params를 False로 설정
-        first_stock = True
+        # 체크포인트가 없는 경우 기본값 초기화
         best_model = None
         best_f1 = 0
-        best_weighted_f1 = 0 
-        best_threshold = 0.5  # 기본 임계값
+        best_weighted_f1 = 0
+        best_threshold = 0.5
+        processed_items = set()
         total_models = 0
         successful_models = 0
-        processed_items = set()
+        last_processed_item = None
     
     # 종목별로 그룹화
-    grouped_results = filtered_results.groupby('code_name')
+    grouped_results = filtered_results.groupby('stock_name')
     
     # 총 처리할 종목 수 계산
     total_items = len(grouped_results)
@@ -2246,30 +2222,22 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     last_telegram_time = time.time()
     
     # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
-    for code_name, group in tqdm(grouped_results, desc="Training models"):
+    for stock_name, group in tqdm(grouped_results, desc="Training models"):
         # 이미 처리한 항목 건너뛰기
-        item_id = code_name
+        item_id = stock_name
         if item_id in processed_items:
-            print(f"이미 처리된 종목 건너뛰기: {code_name}")
+            print(f"이미 처리된 종목 건너뛰기: {stock_name}")
             items_processed += 1
             continue
         
         signal_dates = group['signal_date'].tolist()
         
-        # 문자열 형태의 signal_dates를 datetime 객체로 변환
         valid_signal_dates = []
         for date in signal_dates:
-            if isinstance(date, str):
-                try:
-                    valid_date = pd.to_datetime(date.strip(), format='%Y%m%d').date()
-                    valid_signal_dates.append(valid_date)
-                except ValueError:
-                    print(f"Invalid date format: {date}")
-            else:
-                print(f"Invalid date type: {date}")
-    
+            valid_signal_dates.append(date)
+
         if not valid_signal_dates:
-            print(f"No valid signal dates for {code_name}")
+            print(f"No valid signal dates for {stock_name}")
             # 처리된 것으로 표시
             processed_items.add(item_id)
             items_processed += 1
@@ -2291,7 +2259,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         
         # 각 그룹별로 별도 모델 훈련
         for group_idx, signal_group in enumerate(date_groups):
-            group_id = f"{code_name}_group{group_idx}"
+            group_id = f"{stock_name}_group{group_idx}"
             
             # 이미 처리한 그룹 건너뛰기
             if group_id in processed_items:
@@ -2301,14 +2269,14 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
             end_date = max(signal_group)  # 그룹의 마지막 날짜
             start_date = end_date - timedelta(days=1200)
             
-            print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
+            print(f"\nTraining model for {stock_name} - Group {group_idx+1}: {start_date} to {end_date}")
             
             try:
-                df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
+                df = load_daily_craw_data(craw_db, stock_name, start_date, end_date)
                 
                 # 데이터가 비어있는지 확인
                 if df.empty:
-                    print(f"No data found for {code_name} between {start_date} and {end_date}. Skipping.")
+                    print(f"No data found for {stock_name} between {start_date} and {end_date}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
@@ -2317,7 +2285,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 
                 # 특성 추출 후 비어있는지 확인
                 if df.empty:
-                    print(f"Feature extraction resulted in empty DataFrame for {code_name}. Skipping.")
+                    print(f"Feature extraction resulted in empty DataFrame for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
@@ -2325,7 +2293,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 
                 # 라벨링 후 비어있는지 확인
                 if df.empty:
-                    print(f"Labeling resulted in empty DataFrame for {code_name}. Skipping.")
+                    print(f"Labeling resulted in empty DataFrame for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                 
@@ -2335,21 +2303,21 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 
                 # X 또는 y가 비어있는지 확인
                 if len(X) == 0 or len(y) == 0:
-                    print(f"X or y is empty for {code_name}. Skipping.")
+                    print(f"X or y is empty for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                 
                 # NaN 값 확인 및 처리
                 X = X.replace([np.inf, -np.inf], np.nan).dropna()
                 if X.empty:
-                    print(f"After removing NaN values, X is empty for {code_name}. Skipping.")
+                    print(f"After removing NaN values, X is empty for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
                 # 인덱스 동기화
                 y = y[X.index]
                 if len(y) == 0:
-                    print(f"After index synchronization, y is empty for {code_name}. Skipping.")
+                    print(f"After index synchronization, y is empty for {stock_name}. Skipping.")
                     processed_items.add(group_id)  # 처리된 것으로 표시
                     continue
                     
@@ -2362,12 +2330,12 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 print(f"Test class distribution: {y_test.value_counts().sort_index()}")
                 
                 # 모델 학습
-                model = train_model(X_train, y_train, use_saved_params=(not first_stock), param_file=param_file)
+                model = train_model(X_train, y_train, use_saved_params=(not best_model), param_file=param_file)
                 
                 # 모델 평가 및 저장
                 if model:
                     # 훈련 정보 출력
-                    print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                    print(f"Model trained for {stock_name} from {start_date} to {end_date}")
                     
                     # 최적의 임계값 찾기와 모델 평가 부분을 다중 클래스 여부에 따라 분기
                     if is_multiclass(y_test, model=model):
@@ -2377,13 +2345,13 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                         if weighted_f1 > best_weighted_f1 or best_model is None:
                             best_model = model
                             best_weighted_f1 = weighted_f1
-                            print(f"\n새로운 최적 다중 클래스 모델 발견 - {code_name}")
+                            print(f"\n새로운 최적 다중 클래스 모델 발견 - {stock_name}")
                             print(f"가중 F1 점수 (클래스 중요도 반영): {best_weighted_f1:.4f}")
                             
                                
                             # 최고 모델 업데이트 시 텔레그램 메시지 전송 (다중 클래스)
                             update_message = f"🔥 새로운 최적 다중 클래스 모델 발견!\n"
-                            update_message += f"종목: {code_name}\n"
+                            update_message += f"종목: {stock_name}\n"
                             update_message += f"가중 F1 점수: {best_weighted_f1:.4f}\n"
                             update_message += f"시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                             send_telegram_message(telegram_token, telegram_chat_id, update_message)
@@ -2399,7 +2367,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                                 'processed_items': list(processed_items),
                                 'total_models': total_models,
                                 'successful_models': successful_models,
-                                'first_stock': first_stock
+                                'last_processed_item': stock_name
                             }
                             save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
                     else:
@@ -2434,7 +2402,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                             # 혼동 행렬 계산
                             tn, fp, fn, tp = confusion_matrix(y_test, y_pred, labels=[0, 1]).ravel()
                             
-                            print(f"\n새로운 최적 모델 발견 - {code_name}")
+                            print(f"\n새로운 최적 모델 발견 - {stock_name}")
                             print(f"최적 임계값: {best_threshold:.4f}")
                             print(f"테스트 F1 점수: {best_f1:.4f}")  # F1 점수 출력
                             print(f"테스트 정확도: {accuracy:.4f}")
@@ -2446,7 +2414,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                             
                             # 최고 모델 업데이트 시 텔레그램 메시지 전송 (이진 분류)
                             update_message = f"🔥 새로운 최적 이진 분류 모델 발견!\n"
-                            update_message += f"종목: {code_name}\n"
+                            update_message += f"종목: {stock_name}\n"
                             update_message += f"F1 점수: {best_f1:.4f}\n"
                             update_message += f"임계값: {best_threshold:.4f}\n"
                             update_message += f"정확도: {accuracy:.4f}\n"
@@ -2463,7 +2431,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                                 'processed_items': list(processed_items),
                                 'total_models': total_models,
                                 'successful_models': successful_models,
-                                'first_stock': first_stock
+                                'last_processed_item': stock_name
                             }
                             save_checkpoint_split(checkpoint_data, settings, 'best_model_checkpoint')
                     
@@ -2472,10 +2440,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 # 전체 종목 처리 완료로 표시
                 processed_items.add(item_id)
                 items_processed += 1
-                item_updates.append(f"{code_name} 처리 완료 ({items_processed}/{total_items})")
-                
-                # 첫 번째 종목 처리 후 플래그 변경
-                first_stock = False
+                item_updates.append(f"{stock_name} 처리 완료 ({items_processed}/{total_items})")
                 
                 # 각 종목 처리 후 항상 최신 상태 저장 (매 종목마다)
                 current_time = time.time()
@@ -2487,7 +2452,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     'processed_items': list(processed_items),
                     'total_models': total_models,
                     'successful_models': successful_models,
-                    'first_stock': first_stock,
+                    'last_processed_item': stock_name,
                     'last_saved': current_time
                 }
                 
@@ -2500,7 +2465,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 should_save_checkpoint = (items_processed % checkpoint_interval == 0) or (current_time - last_checkpoint_time > 1800)
                     
             except Exception as e:
-                print(f"Error training model for {code_name}: {e}")
+                print(f"Error training model for {stock_name}: {e}")
                 import traceback
                 traceback.print_exc()
                 
@@ -2512,7 +2477,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     'processed_items': list(processed_items),
                     'total_models': total_models,
                     'successful_models': successful_models,
-                    'first_stock': first_stock
+                    'last_processed_item': stock_name
                 }
                 save_checkpoint_split(checkpoint_data, settings, 'error_recovery_checkpoint')
         
@@ -2530,7 +2495,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                     'processed_items': list(processed_items),
                     'total_models': total_models,
                     'successful_models': successful_models,
-                    'first_stock': first_stock
+                    'last_processed_item': stock_name
                 }
                 save_checkpoint_split(checkpoint_data, settings)
                 last_checkpoint_time = current_time
@@ -2632,7 +2597,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
     processed_stocks = set()
     
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
-        table_name = row.code_name
+        table_name = row.stock_name
         
         if table_name in processed_stocks:
             continue
@@ -2676,7 +2641,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
         validation_results = validation_results.sort_values(by='date')
         
         # 중복 제거
-        validation_results = validation_results.drop_duplicates(subset=['date', 'stock_code'])
+        validation_results = validation_results.drop_duplicates(subset=['date', 'stock_name'])
         
         print("\nAll validation results before filtering:")
         print(validation_results)
@@ -2696,13 +2661,13 @@ def validate_model(model, buy_list_db, craw_db, settings):
         print(validation_results)
         
         # 검증된 종목의 개수 출력
-        unique_stock_codes = validation_results['stock_code'].nunique()
+        unique_stock_names = validation_results['stock_name'].nunique()
         unique_dates = validation_results['date'].dt.date.nunique()
-        print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
+        print(f"\nNumber of unique stock codes found during validation: {unique_stock_names}")
         print(f"Number of unique dates: {unique_dates}")
         
         # 메시지 전송
-        message = f"Validation completed. Found patterns in {unique_stock_codes} stocks across {unique_dates} dates.\nDate range: {validation_results['date'].min()} to {validation_results['date'].max()}"
+        message = f"Validation completed. Found patterns in {unique_stock_names} stocks across {unique_dates} dates.\nDate range: {validation_results['date'].min()} to {validation_results['date'].max()}"
         send_telegram_message(telegram_token, telegram_chat_id, message)
     else:
         print("No patterns found in the validation period")
@@ -2710,7 +2675,6 @@ def validate_model(model, buy_list_db, craw_db, settings):
         send_telegram_message(telegram_token, telegram_chat_id, message)
     
     return validation_results
-
 
 def save_checkpoint_split(checkpoint_data, settings, checkpoint_name='training_checkpoint'):
     """체크포인트를 분할하여 저장합니다."""
@@ -2744,57 +2708,88 @@ def save_checkpoint_split(checkpoint_data, settings, checkpoint_name='training_c
     checkpoint_data['best_model'] = model
     return True
 
+
 def load_checkpoint_split(settings, checkpoint_name='training_checkpoint'):
-    """분할 저장된 체크포인트를 로드합니다. 자동으로 최고 모델도 확인합니다."""
+    """분할 저장된 체크포인트를 로드합니다. 최고 모델과 최신 처리 항목을 병합합니다."""
     model_dir = settings['model_dir']
     
     # 최고 모델 체크포인트 경로
     best_meta_path = os.path.join(model_dir, "best_model_checkpoint_meta.pkl")
     best_model_path = os.path.join(model_dir, "best_model_checkpoint_model.json")
     
-    # 일반 체크포인트 경로
+    # 일반 체크포인트 경로 (최신 진행 상태)
     reg_meta_path = os.path.join(model_dir, f"{checkpoint_name}_meta.pkl")
     reg_model_path = os.path.join(model_dir, f"{checkpoint_name}_model.json")
     
-    # 최고 모델 체크포인트가 있으면 우선 로드
-    if os.path.exists(best_meta_path) and os.path.exists(best_model_path):
-        print("최고 성능 모델 체크포인트 발견. 이 체크포인트로 재개합니다.")
-        meta_path = best_meta_path
-        model_path = best_model_path
-    # 일반 체크포인트 사용
-    elif os.path.exists(reg_meta_path):
-        print("일반 체크포인트 사용")
-        meta_path = reg_meta_path
-        model_path = reg_model_path
-    else:
-        print(f"체크포인트 메타데이터를 찾을 수 없습니다.")
-        return None, False
+    best_checkpoint_data = None
+    best_checkpoint_exists = False
+    reg_checkpoint_data = None
+    reg_checkpoint_exists = False
     
-
-    try:
-        # 메타데이터 로드
-        checkpoint_data = joblib.load(meta_path)
-        print(f"메타데이터 로드 완료: {meta_path}")
-        
-        # 모델 로드 시도
-        if os.path.exists(model_path):
-            model = xgb.XGBClassifier()
-            model.load_model(model_path)
-            checkpoint_data['best_model'] = model
-            print(f"모델 로드 완료: {model_path}")
-        else:
-            print(f"모델 파일이 없습니다. 메타데이터만 로드했습니다.")
-            checkpoint_data['best_model'] = None
-        
-        processed_items_count = len(checkpoint_data.get('processed_items', []))
-        print(f"이미 처리된 종목 수: {processed_items_count}")
-        return checkpoint_data, True
-    except Exception as e:
-        print(f"체크포인트 로드 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, False
-
+    # 최고 모델 체크포인트 로드 시도
+    if os.path.exists(best_meta_path):
+        try:
+            # 메타데이터 로드
+            best_checkpoint_data = joblib.load(best_meta_path)
+            best_checkpoint_exists = True
+            print(f"최고 모델 체크포인트 메타데이터 로드 완료")
+            
+            # 모델 로드 시도
+            if os.path.exists(best_model_path):
+                model = xgb.XGBClassifier()
+                model.load_model(best_model_path)
+                best_checkpoint_data['best_model'] = model
+                print(f"최고 모델 로드 완료")
+            else:
+                print(f"최고 모델 파일이 없습니다.")
+                best_checkpoint_data['best_model'] = None
+        except Exception as e:
+            print(f"최고 모델 체크포인트 로드 중 오류: {e}")
+            best_checkpoint_exists = False
+    
+    # 일반 체크포인트 로드 시도 (최신 처리 항목 정보 가져오기)
+    if os.path.exists(reg_meta_path):
+        try:
+            # 메타데이터 로드
+            reg_checkpoint_data = joblib.load(reg_meta_path)
+            reg_checkpoint_exists = True
+            print(f"일반 체크포인트 메타데이터 로드 완료")
+        except Exception as e:
+            print(f"일반 체크포인트 로드 중 오류: {e}")
+            reg_checkpoint_exists = False
+    
+    # 병합된 체크포인트 데이터 생성
+    result_data = {}
+    
+    # 최고 성능 모델 정보는 `best_model_checkpoint`에서 가져오기
+    if best_checkpoint_exists:
+        result_data['best_model'] = best_checkpoint_data.get('best_model', None)
+        result_data['best_f1'] = best_checkpoint_data.get('best_f1', 0)
+        result_data['best_weighted_f1'] = best_checkpoint_data.get('best_weighted_f1', 0)
+        result_data['best_threshold'] = best_checkpoint_data.get('best_threshold', 0.5)
+    else:
+        print("최고 성능 모델 체크포인트가 없습니다. 기본값 사용.")
+        result_data['best_model'] = None
+        result_data['best_f1'] = 0
+        result_data['best_weighted_f1'] = 0
+        result_data['best_threshold'] = 0.5
+    
+    # 진행 상태 정보는 `regular_checkpoint`에서 가져오기
+    if reg_checkpoint_exists:
+        result_data['processed_items'] = reg_checkpoint_data.get('processed_items', [])
+        result_data['total_models'] = reg_checkpoint_data.get('total_models', 0)
+        result_data['successful_models'] = reg_checkpoint_data.get('successful_models', 0)
+        result_data['last_processed_item'] = reg_checkpoint_data.get('last_processed_item', None)
+    else:
+        print("일반 체크포인트가 없습니다. 진행 상태를 기본값으로 초기화합니다.")
+        result_data['processed_items'] = []
+        result_data['total_models'] = 0
+        result_data['successful_models'] = 0
+        result_data['last_processed_item'] = None
+    
+    # 체크포인트 존재 여부 반환
+    checkpoint_exists = best_checkpoint_exists or reg_checkpoint_exists
+    return result_data, checkpoint_exists
 
 
 def main():
@@ -2804,13 +2799,17 @@ def main():
     
     # 데이터 로드
     filtered_results = load_filtered_stock_results(buy_list_db, settings['results_table'])
-    
+
     if (filtered_results.empty):
         print("Error: No filtered stock results loaded")
         return
-    
+
     print("Filtered stock results loaded successfully")
-    filtered_results.rename(columns={'start_date': 'signal_date'}, inplace=True)
+
+    # signal_date 컬럼이 있는지 확인하고, 없는 경우 start_date 컬럼을 signal_date로 변경
+    if 'signal_date' not in filtered_results.columns and 'start_date' in filtered_results.columns:
+        filtered_results.rename(columns={'start_date': 'signal_date'}, inplace=True)
+    
     # 모델 파일 이름 저장 변수
     model_filename = None
     best_threshold = 0.5  # 기본 임계값

@@ -11,7 +11,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import cf
 from mysql_loader import list_tables_in_database, load_data_from_mysql
-from stock_utils import get_stock_items  # get_stock_items 함수를 가져옵니다.
 from tqdm import tqdm  # tqdm 라이브러리를 가져옵니다.
 from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 임포트
 from datetime import datetime, timedelta
@@ -24,6 +23,7 @@ import tsaug
 import tensorflow as tf
 from tensorflow.keras import layers, Model, optimizers
 import time
+import stock_utils
 
 # joblib 메모리 매핑 설정 변경 (필요시)
 import joblib
@@ -405,25 +405,6 @@ def load_filtered_stock_results(db_manager, table):
     try:
         query = f"SELECT * FROM {table}"
         df = db_manager.execute_query(query)
-        return df
-    except Exception as e:
-        print(f"Error loading data from MySQL: {e}")
-        return pd.DataFrame()
-
-def load_daily_craw_data(db_manager, table, start_date, end_date):
-    try:
-        start_date_str = start_date.strftime('%Y%m%d')
-        end_date_str = end_date.strftime('%Y%m%d')
-        print(f"Loading data from {start_date_str} to {end_date_str} for table {table}")
-        
-        query = f"""
-            SELECT * FROM `{table}`
-            WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
-            ORDER BY date ASC
-        """
-        
-        df = db_manager.execute_query(query)
-        print(f"Data loaded from {start_date_str} to {end_date_str} for table {table}: {len(df)} rows")
         return df
     except Exception as e:
         print(f"Error loading data from MySQL: {e}")
@@ -1207,7 +1188,7 @@ def optimize_threshold(model, X_val, y_val, metric='f1'):
     
     return best_threshold
 
-def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
+def predict_pattern(model, df, stock_name, use_data_dates=False, settings=None):
     """패턴을 예측하고 결과를 반환합니다."""
     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
@@ -1216,7 +1197,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
         
         # 1. 데이터 전처리
         X = df[COLUMNS_TRAINING_DATA].copy()
@@ -1224,7 +1205,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
         
         if X.empty:
             print("No valid data for prediction after preprocessing.")
-            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
         
         # 2. 클래스 예측
         predictions = model.predict(X)
@@ -1266,7 +1247,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             # 날짜 열이 있는지 확인
             if 'date' not in result_df.columns:
                 print("Warning: 'date' column not found in dataframe")
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
             # 문자열 날짜를 datetime으로 변환
             if isinstance(result_df['date'].iloc[0], str):
@@ -1276,7 +1257,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             result_df = result_df.dropna(subset=['date'])
             if result_df.empty:
                 print("No valid dates found in data.")
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
             print(f"Date range in data: {result_df['date'].min()} to {result_df['date'].max()}")
             
@@ -1288,8 +1269,8 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
             else:
                 # 예측 모드: cf.py 설정 사용
-                validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE).zfill(8), format='%Y%m%d')
-                validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE).zfill(8), format='%Y%m%d')
+                validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+                validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
             
             print(f"Validation period: {validation_start_date} to {validation_end_date}")
             
@@ -1299,8 +1280,8 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             print(f'Patterns with value > 0: {len(positive_patterns)} matches found')
             
             if positive_patterns.empty:
-                print(f"No positive patterns found for {stock_code}")
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                print(f"No positive patterns found for {stock_name}")
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
             # 검증 기간 내 필터링
             recent_patterns = positive_patterns[
@@ -1312,14 +1293,14 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             
             # 8. 최종 결과 반환
             if not recent_patterns.empty:
-                recent_patterns['stock_code'] = stock_code
-                final_result = recent_patterns[['date', 'stock_code', 'confidence']]
-                print(f'Found patterns for {stock_code} with confidence:')
+                recent_patterns['stock_name'] = stock_name
+                final_result = recent_patterns[['date', 'stock_name', 'confidence']]
+                print(f'Found patterns for {stock_name} with confidence:')
                 print(final_result)
                 return final_result
             else:
-                print(f'No patterns found for {stock_code} in validation period')
-                return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+                print(f'No patterns found for {stock_name} in validation period')
+                return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
                 
         except Exception as e:
             print(f"Error in date processing: {e}")
@@ -1328,14 +1309,14 @@ def predict_pattern(model, df, stock_code, use_data_dates=False, settings=None):
             print(f"Debug info - date types: df={type(result_df['date'].iloc[0])}, start={type(validation_start_date)}")
             import traceback
             traceback.print_exc()
-            return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+            return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
             
     except Exception as e:
         print(f'Error predicting patterns: {e}')
         print(f'Error type: {type(e).__name__}')
         import traceback
         print(f'Stack trace:\n{traceback.format_exc()}')
-        return pd.DataFrame(columns=['date', 'stock_code', 'confidence'])
+        return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
 
 def evaluate_performance(df, performance_start_date, performance_end_date):
     try:
@@ -1373,7 +1354,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
             deep_learning_data.append({
                 'date': row['pattern_date'],
                 'method': model_name,
-                'code_name': row['stock_code'],
+                'stock_name': row['stock_name'],
                 'confidence': round(row['confidence'], 4),
                 'estimated_profit_rate': round(row['max_return'] - abs(row['max_loss']), 2)
             })
@@ -1406,20 +1387,20 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     performance_results = []
     
     for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
-        code_name = row['stock_code']
+        stock_name = row['stock_name']
         pattern_date = row['date']
         confidence = row.get('confidence', 0)  # confidence 값 가져오기
         performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
         performance_end_date = performance_start_date + pd.Timedelta(days=60)
         
-        df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
-        print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
+        df = load_daily_craw_data(craw_db, stock_name, performance_start_date, performance_end_date)
+        print(f"Evaluating performance for {stock_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
         
         # 데이터가 없는 경우에도 결과에 포함 (마지막 날짜 처리를 위함)
         if df.empty:
-            print(f"No data available for {code_name} after {pattern_date}. Including with 0 return.")
+            print(f"No data available for {stock_name} after {pattern_date}. Including with 0 return.")
             performance_results.append({
-                'stock_code': code_name,
+                'stock_name': stock_name,
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
@@ -1432,10 +1413,10 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             # None이 반환되는 경우에도 0으로 처리하여 포함
             if estimated_profit_rate is None:
                 estimated_profit_rate = 0.0
-                print(f"No valid return found for {code_name}. Using 0 instead.")
+                print(f"No valid return found for {stock_name}. Using 0 instead.")
                 
             performance_results.append({
-                'stock_code': code_name,
+                'stock_name': stock_name,
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
@@ -1476,7 +1457,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
     try:
         # DataFrame을 문자열로 변환
         # Select the desired columns
-        selected_columns = performance_df[['pattern_date', 'stock_code', 'confidence','estimated_profit_rate']]
+        selected_columns = performance_df[['pattern_date', 'stock_name', 'confidence','estimated_profit_rate']]
         # Convert to string
         message = selected_columns.to_string(index=False)
         
@@ -1719,7 +1700,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         processed_items = set()
     
     # 종목별로 그룹화
-    grouped_results = filtered_results.groupby('code_name')
+    grouped_results = filtered_results.groupby('stock_name')
     
     # 총 처리할 종목 수 계산
     total_items = len(grouped_results)
@@ -1731,7 +1712,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
     last_telegram_time = time.time()
     
     # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
-    for code_name, group in tqdm(grouped_results, desc="Training models"):
+    for stock_name, group in tqdm(grouped_results, desc="Training models"):
         # 열 이름 확인
         print("Columns in group DataFrame:", group.columns.tolist())
         
@@ -1749,7 +1730,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 print(f"Invalid date format: {date}")
         
         if not valid_signal_dates:
-            print(f"No valid signal dates for {code_name}")
+            print(f"No valid signal dates for {stock_name}")
             continue
         
         # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
@@ -1768,7 +1749,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
         
         # 각 그룹별로 별도 모델 훈련
         for group_idx, signal_group in enumerate(date_groups):
-            group_id = f"{code_name}_group{group_idx}"
+            group_id = f"{stock_name}_group{group_idx}"
             item_id = group_id  # item_id를 group_id로 설정
 
             # 이미 처리한 그룹 건너뛰기
@@ -1779,14 +1760,14 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
             end_date = max(signal_group)  # 그룹의 마지막 날짜
             start_date = end_date - timedelta(days=1200)
 
-            print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
+            print(f"\nTraining model for {stock_name} - Group {group_idx+1}: {start_date} to {end_date}")
 
             try:
-                df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
+                df = load_daily_craw_data(craw_db, stock_name, start_date, end_date)
 
                 # 데이터가 비어있는지 확인
                 if df.empty:
-                    print(f"No data found for {code_name} between {start_date} and {end_date}. Skipping.")
+                    print(f"No data found for {stock_name} between {start_date} and {end_date}. Skipping.")
                     processed_items.add(item_id)  # 처리된 것으로 표시
                     continue
 
@@ -1795,7 +1776,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
 
                 # 특성 추출 후 비어있는지 확인
                 if df.empty:
-                    print(f"Feature extraction resulted in empty DataFrame for {code_name}. Skipping.")
+                    print(f"Feature extraction resulted in empty DataFrame for {stock_name}. Skipping.")
                     processed_items.add(item_id)  # 처리된 것으로 표시
                     continue
 
@@ -1803,7 +1784,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
 
                 # 라벨링 후 비어있는지 확인
                 if df.empty:
-                    print(f"Labeling resulted in empty DataFrame for {code_name}. Skipping.")
+                    print(f"Labeling resulted in empty DataFrame for {stock_name}. Skipping.")
                     processed_items.add(item_id)  # 처리된 것으로 표시
                     continue
 
@@ -1813,21 +1794,21 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
 
                 # X 또는 y가 비어있는지 확인
                 if len(X) == 0 or len(y) == 0:
-                    print(f"X or y is empty for {code_name}. Skipping.")
+                    print(f"X or y is empty for {stock_name}. Skipping.")
                     processed_items.add(item_id)  # 처리된 것으로 표시
                     continue
 
                 # NaN 값 확인 및 처리
                 X = X.replace([np.inf, -np.inf], np.nan).dropna()
                 if X.empty:
-                    print(f"After removing NaN values, X is empty for {code_name}. Skipping.")
+                    print(f"After removing NaN values, X is empty for {stock_name}. Skipping.")
                     processed_items.add(item_id)  # 처리된 것으로 표시
                     continue
 
                 # 인덱스 동기화
                 y = y[X.index]
                 if len(y) == 0:
-                    print(f"After index synchronization, y is empty for {code_name}. Skipping.")
+                    print(f"After index synchronization, y is empty for {stock_name}. Skipping.")
                     processed_items.add(item_id)  # 처리된 것으로 표시
                     continue
 
@@ -1844,7 +1825,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
 
                 # 모델 평가 및 저장
                 if model:
-                    print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                    print(f"Model trained for {stock_name} from {start_date} to {end_date}")
                     successful_models += 1
 
                 # 처리된 것으로 표시
@@ -1852,7 +1833,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings, threshold_met
                 items_processed += 1
 
             except Exception as e:
-                print(f"Error training model for {code_name}: {e}")
+                print(f"Error training model for {stock_name}: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -1957,8 +1938,8 @@ def validate_model(model, buy_list_db, craw_db, settings):
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
     
     print(f"\nLoading data for validation from {cf.VALIDATION_START_DATE} to {cf.VALIDATION_END_DATE}")
-    validation_start_date = pd.to_datetime(str(cf.VALIDATION_START_DATE), format='%Y%m%d')
-    validation_end_date = pd.to_datetime(str(cf.VALIDATION_END_DATE), format='%Y%m%d')    
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+    validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)   
     validation_results = pd.DataFrame()
     
     # 종목 목록 가져오기
@@ -1970,7 +1951,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
     processed_stocks = set()
     
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="Validating patterns"):
-        table_name = row.code_name
+        table_name = row.stock_name
         
         if table_name in processed_stocks:
             continue
@@ -2014,7 +1995,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
         validation_results = validation_results.sort_values(by='date')
         
         # 중복 제거
-        validation_results = validation_results.drop_duplicates(subset=['date', 'stock_code'])
+        validation_results = validation_results.drop_duplicates(subset=['date', 'stock_name'])
         
         print("\nAll validation results before filtering:")
         print(validation_results)
@@ -2034,13 +2015,13 @@ def validate_model(model, buy_list_db, craw_db, settings):
         print(validation_results)
         
         # 검증된 종목의 개수 출력
-        unique_stock_codes = validation_results['stock_code'].nunique()
+        unique_stock_names = validation_results['stock_name'].nunique()
         unique_dates = validation_results['date'].dt.date.nunique()
-        print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
+        print(f"\nNumber of unique stock codes found during validation: {unique_stock_names}")
         print(f"Number of unique dates: {unique_dates}")
         
         # 메시지 전송
-        message = f"Validation completed. Found patterns in {unique_stock_codes} stocks across {unique_dates} dates.\nDate range: {validation_results['date'].min()} to {validation_results['date'].max()}"
+        message = f"Validation completed. Found patterns in {unique_stock_names} stocks across {unique_dates} dates.\nDate range: {validation_results['date'].min()} to {validation_results['date'].max()}"
         send_telegram_message(telegram_token, telegram_chat_id, message)
     else:
         print("No patterns found in the validation period")

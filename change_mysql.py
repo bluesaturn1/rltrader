@@ -392,6 +392,115 @@ def update_date_column_type(host, user, password, database, max_tables=None, bat
         import traceback
         traceback.print_exc()
 
+def rename_code_name_to_stock_name(host, user, password, database, max_tables=None, batch_size=100, debug=False):
+    """모든 테이블의 'code_name' 컬럼을 'stock_name'으로 변경합니다."""
+    try:
+        print(f"Connecting to MySQL database: {database} at {host}...")
+        # Get table names using SQLAlchemy
+        engine = create_engine(f"mysql+mysqldb://{user}:{password}@{host}/{database}")
+        connection = engine.connect()
+        print("Connection successful.")
+        
+        # Get all table names in the database
+        table_query = "SHOW TABLES"
+        tables = pd.read_sql(table_query, connection)
+        table_names = tables.iloc[:, 0].tolist()
+        connection.close()
+        
+        # 테이블 수 제한 (디버깅 목적)
+        if max_tables and max_tables > 0:
+            table_names = table_names[:max_tables]
+            print(f"Limiting to first {max_tables} tables for testing")
+        
+        total_tables = len(table_names)
+        print(f"Found {total_tables} tables in database {database}")
+        if total_tables == 0:
+            print("No tables found to process.")
+            return
+        
+        # Print first few table names as a sample
+        print(f"Sample table names: {table_names[:5]}")
+        
+        # Connect with PyMySQL - this approach worked successfully
+        print("Connecting with PyMySQL...")
+        import pymysql
+        
+        pymysql_conn = pymysql.connect(
+            host=host,
+            user=user,
+            password=password,
+            database=database,
+            connect_timeout=30
+        )
+        print("PyMySQL connection successful")
+        
+        # Process tables in batches
+        success_count = 0
+        error_count = 0
+        skipped_count = 0
+        
+        # Create batches for processing
+        batches = [table_names[i:i + batch_size] for i in range(0, total_tables, batch_size)]
+        
+        for batch_num, batch in enumerate(batches):
+            print(f"\nProcessing batch {batch_num + 1}/{len(batches)} ({len(batch)} tables)")
+            
+            for i, table in enumerate(tqdm(batch, desc=f"Batch {batch_num + 1}", unit="table")):
+                table_index = batch_num * batch_size + i
+                
+                try:
+                    if debug:
+                        print(f"\n[{table_index + 1}/{total_tables}] Processing table: {table}")
+                    
+                    with pymysql_conn.cursor() as cursor:
+                        # Check if code_name column exists
+                        check_query = f"SHOW COLUMNS FROM `{table}` LIKE 'code_name'"
+                        cursor.execute(check_query)
+                        result = cursor.fetchone()
+                        
+                        if not result:
+                            if debug:
+                                print(f"  - Table {table} does not have a 'code_name' column. Skipping.")
+                            skipped_count += 1
+                            continue
+                        
+                        # Check if stock_name column already exists
+                        check_stock_name_query = f"SHOW COLUMNS FROM `{table}` LIKE 'stock_name'"
+                        cursor.execute(check_stock_name_query)
+                        stock_name_result = cursor.fetchone()
+                        
+                        if stock_name_result:
+                            if debug:
+                                print(f"  - Table {table} already has a 'stock_name' column. Skipping.")
+                            skipped_count += 1
+                            continue
+                        
+                        # Rename column
+                        rename_query = f"ALTER TABLE `{table}` CHANGE `code_name` `stock_name` VARCHAR(255)"
+                        cursor.execute(rename_query)
+                        pymysql_conn.commit()
+                        success_count += 1
+                        
+                        if debug or (success_count % 10 == 0):
+                            print(f"  - Successfully renamed column in table {table}")
+                
+                except Exception as e:
+                    error_count += 1
+                    print(f"  - Error updating table {table}: {e}")
+                    continue
+            
+            # Report progress after each batch
+            print(f"\nBatch {batch_num + 1} completed. Progress: {success_count} renamed, {skipped_count} skipped, {error_count} failed")
+        
+        pymysql_conn.close()
+        print(f"\nProcess completed. Total: {total_tables} tables")
+        print(f"Results: {success_count} successfully renamed, {skipped_count} skipped (no code_name column or already stock_name column), {error_count} failed")
+        
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     """메인 실행 함수"""
     # 설정 로드
@@ -404,11 +513,17 @@ def main():
         print("MySQL connection test failed.")
         return
     
-    print("\n===== 시작: 'date' 컬럼 타입 변경 =====")
+    # print("\n===== 시작: 'date' 컬럼 타입 변경 =====")
+    # # 모든 테이블 처리 (max_tables=None)
+    # update_date_column_type(config['host'], config['user'], config['password'], 
+    #                        config['database_craw'], max_tables=None, batch_size=100, debug=False)
+    # print("===== 완료: 'date' 컬럼 타입 변경 =====\n")
+    
+    print("\n===== 시작: 'code_name' 컬럼 -> 'stock_name'으로 변경 =====")
     # 모든 테이블 처리 (max_tables=None)
-    update_date_column_type(config['host'], config['user'], config['password'], 
-                           config['database_craw'], max_tables=None, batch_size=100, debug=False)
-    print("===== 완료: 'date' 컬럼 타입 변경 =====\n")
+    rename_code_name_to_stock_name(config['host'], config['user'], config['password'],
+                                   config['database_craw'], max_tables=None, batch_size=100, debug=False)
+    print("===== 완료: 'code_name' 컬럼 -> 'stock_name'으로 변경 =====\n")
     
     print("프로그램 실행이 완료되었습니다.")
 

@@ -47,12 +47,11 @@ PREDICTION_VALIDATION_DAYS = 30  # 최신 데이터 이후 30일간의 예측 �
 # LSTM
 LSTM_PREDICTION_LIMIT = 0.1
 # 검증 설정
-VALIDATION_START_DATE = '2023-07-01'  # 검증 기간 시작 날짜 설정
-VALIDATION_END_DATE = '2023-07-31'  # 검증 기간 종료 날짜 설정
+VALIDATION_START_DATE = '2025-03-24'  # 검증 기간 시작 날짜 설정
+VALIDATION_END_DATE = '2025-03-27'  # 검증 기간 종료 날짜 설정
 # 오늘 기준 검증
 # 현재 날짜 가져오기
 now = datetime.now()
-
 # validation_end_date 설정 (현재 날짜)
 validation_end = now
 

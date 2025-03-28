@@ -310,7 +310,7 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         return None
 
 
-def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
+def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
     
@@ -318,7 +318,7 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'stock_code'])
+            return pd.DataFrame(columns=['date', 'stock_name'])
         X = df[COLUMNS_TRAINING_DATA]  # 지역 변수로 간결하게 사용
      
         # 무한대 값이나 너무 큰 값 제거
@@ -365,27 +365,27 @@ def predict_pattern(model, df, stock_code, use_data_dates=True, settings=None):
             print(f'Filtered patterns in validation period: {len(recent_patterns)}')
             
             if not recent_patterns.empty:
-                recent_patterns['stock_code'] = stock_code
-                result = recent_patterns[['date', 'stock_code']]
-                print(f'Found patterns for {stock_code}:')
+                recent_patterns['stock_name'] = stock_name
+                result = recent_patterns[['date', 'stock_name']]
+                print(f'Found patterns for {stock_name}:')
                 print(result)
                 return result
             else:
-                print(f'No patterns found for {stock_code} in validation period')
-                return pd.DataFrame(columns=['date', 'stock_code'])
+                print(f'No patterns found for {stock_name} in validation period')
+                return pd.DataFrame(columns=['date', 'stock_name'])
                 
         except Exception as e:
             print(f"Error in date processing: {e}")
             print(f"Debug info - df['date'] sample: {df['date'].head()}")
             print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE_AUTO}")
-            return pd.DataFrame(columns=['date', 'stock_code'])
+            return pd.DataFrame(columns=['date', 'stock_name'])
             
     except Exception as e:
         print(f'Error predicting patterns: {e}')
         print(f'Error type: {type(e).__name__}')
         import traceback
         print(f'Stack trace:\n{traceback.format_exc()}')
-        return pd.DataFrame(columns=['date', 'stock_code'])
+        return pd.DataFrame(columns=['date', 'stock_name'])
 
 
 def evaluate_performance(df, start_date, end_date):
@@ -433,7 +433,7 @@ def evaluate_performance(df, start_date, end_date):
         return 0.0  # 오류 발생 시 0 반환
 
 def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name='xgboost'):
-    """모델 성능 결과를 deep_learning 테이블에 저장합니다."""
+    """모델 성능 결과를 deep_learning 테이블에 저장합니다. 이미 존재하는 항목은 건너뜁니다."""
     try:
         # 새로운 데이터 구성
         deep_learning_data = []
@@ -442,7 +442,7 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
             deep_learning_data.append({
                 'date': row['pattern_date'],
                 'method': 'xgboost_weighted',  # 하드코딩된 'xgboost' 대신 인자로 받은 model_name 사용
-                'code_name': row['stock_code'],
+                'stock_name': row['stock_name'],
                 'confidence': row.get('confidence', 0),  # 신뢰도값이 있으면 사용, 없으면 0
                 'estimated_profit_rate': row['max_return']
             })
@@ -454,27 +454,56 @@ def save_xgboost_to_deep_learning_table(performance_df, buy_list_db, model_name=
             print("No data to save to deep_learning table")
             return False
         
-        # 기존 데이터 삭제
+        # 저장하려는 데이터의 날짜 범위 확인
         start_date = deep_learning_df['date'].min()
         end_date = deep_learning_df['date'].max()
-        delete_query = f"DELETE FROM deep_learning WHERE date >= '{start_date}' AND date <= '{end_date}' AND method = '{model_name}'"
-        buy_list_db.execute_update_query(delete_query)
         
-        # 새로운 데이터 삽입
+        # 기존에 이미 존재하는 데이터 조회
+        existing_query = f"""
+            SELECT date, method, stock_name FROM deep_learning 
+            WHERE date >= '{start_date}' AND date <= '{end_date}' 
+            AND method = '{model_name}'
+        """
+        existing_data = buy_list_db.execute_query(existing_query)
+        
+        # 기존 항목의 고유 식별자 세트 생성 (date, method, stock_name 조합)
+        existing_items = set()
+        for _, row in existing_data.iterrows():
+            # 날짜 형식 통일 (문자열로 변환)
+            date_str = row['date'].strftime('%Y-%m-%d') if isinstance(row['date'], pd.Timestamp) else str(row['date'])
+            existing_items.add((date_str, row['method'], row['stock_name']))
+        
+        # 새로 추가할 항목만 필터링
+        new_items = []
         for _, row in deep_learning_df.iterrows():
+            date_str = row['date'].strftime('%Y-%m-%d') if isinstance(row['date'], pd.Timestamp) else str(row['date'])
+            if (date_str, row['method'], row['stock_name']) not in existing_items:
+                new_items.append(row)
+        
+        # 새 항목이 없으면 종료
+        if not new_items:
+            print("All items already exist in deep_learning table. No new data to insert.")
+            return True
+        
+        # 새 항목만 삽입
+        print(f"Adding {len(new_items)} new items to deep_learning table")
+        for row in new_items:
+            # 날짜가 datetime 객체인 경우 문자열로 변환
+            date_str = row['date'].strftime('%Y-%m-%d') if isinstance(row['date'], pd.Timestamp) else row['date']
             insert_query = f"""
-                INSERT INTO deep_learning (date, method, code_name, confidence, estimated_profit_rate)
-                VALUES ('{row['date']}', '{row['method']}', '{row['code_name']}', {row['confidence']}, {row['estimated_profit_rate']})
+                INSERT INTO deep_learning (date, method, stock_name, confidence, estimated_profit_rate)
+                VALUES ('{date_str}', '{row['method']}', '{row['stock_name']}', {row['confidence']}, {row['estimated_profit_rate']})
             """
             buy_list_db.execute_update_query(insert_query)
         
-        print(f"{model_name} 성능 결과가 deep_learning 테이블에 성공적으로 저장되었습니다. (총 {len(deep_learning_df)}개 항목)")
+        print(f"{model_name} 성능 결과가 deep_learning 테이블에 성공적으로 저장되었습니다. (새로 추가된 항목: {len(new_items)}개)")
         return True
     except Exception as e:
         print(f"deep_learning 테이블 저장 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         return False
+
 
 def evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename=None):
     """모델의 성능을 평가합니다."""
@@ -489,7 +518,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
         performance_results = []
         
         for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
-            code_name = row['stock_code']
+            stock_name = row['stock_name']
             pattern_date = row['date']
             prediction_score = row['score']  # 예측 점수 저장
             
@@ -498,8 +527,8 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             performance_end_date = pattern_date + pd.Timedelta(days=60)   # 60일 동안
             
             # 데이터 로드
-            df = load_daily_craw_data(craw_db, code_name, performance_start_date, performance_end_date)
-            print(f"Evaluating performance for {code_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
+            df = load_daily_craw_data(craw_db, stock_name, performance_start_date, performance_end_date)
+            print(f"Evaluating performance for {stock_name} from {performance_start_date} to {performance_end_date}: {len(df)} rows")
             
             # 날짜 형식 확인 및 변환
             if not pd.api.types.is_datetime64_any_dtype(df['date']):
@@ -513,12 +542,12 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             max_return = 0.0
             
             if df.empty:
-                print(f"No data available for {code_name} after {performance_start_date}. This might be the latest pattern.")
+                print(f"No data available for {stock_name} after {performance_start_date}. This might be the latest pattern.")
                 is_latest_data = True
             else:
                 # 다음날 데이터 유무 확인
                 if df[df['date'] >= performance_start_date].empty:
-                    print(f"This is the latest data available for {code_name}. Next trading day not available yet.")
+                    print(f"This is the latest data available for {stock_name}. Next trading day not available yet.")
                     is_latest_data = True
                 else:
                     # 성능 계산
@@ -526,7 +555,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             
             # 모든 케이스에 대해 결과 저장 (최신 데이터 여부 표시 포함)
             performance_results.append({
-                'stock_code': code_name,
+                'stock_name': stock_name,
                 'pattern_date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
@@ -546,13 +575,13 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             
             print("\nLatest patterns (no performance data yet):")
             if not latest_results.empty:
-                print(latest_results[['stock_code', 'pattern_date']])
+                print(latest_results[['stock_name', 'pattern_date']])
             else:
                 print("None")
                 
             print("\nHistorical performance results:")
             if not history_results.empty:
-                print(history_results[['stock_code', 'pattern_date', 'prediction_score', 'max_return']])
+                print(history_results[['stock_name', 'pattern_date', 'prediction_score', 'max_return']])
                 
                 # 히스토리 결과에 대한 평균 수익률 계산
                 avg_return = history_results['max_return'].mean()
@@ -569,7 +598,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 print(f"Minimum historical return: {min_profit:.2f}%")
             
             # 결과를 데이터베이스에 저장
-            save_performance_to_db(performance_df, buy_list_db, settings['performance_table'])
+            # save_performance_to_db(performance_df, buy_list_db, settings['performance_table'])
             
             # deep_learning 테이블에도 저장
             save_xgboost_to_deep_learning_table(performance_df, buy_list_db, 'dense_xgboost')
@@ -587,7 +616,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
                 # 수익률 순으로 정렬
                 sorted_history = history_results.sort_values(by='pattern_date', ascending=True)
                 for _, row in sorted_history.iterrows():
-                    message += f"{row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}, Return: {row['max_return']:.2f}%\n"
+                    message += f"{row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_name']} - Score: {row['prediction_score']:.4f}, Return: {row['max_return']:.2f}%\n"
                 
                 message += f"\nAverage return: {avg_return:.2f}%"
                 if 'prediction_score' in history_results.columns:
@@ -597,7 +626,7 @@ def evaluate_model_performance(validation_results, buy_list_db, craw_db, setting
             if not latest_results.empty:
                 message += "📊 LATEST PATTERNS (Today's signals):\n"
                 for _, row in latest_results.iterrows():
-                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_code']} - Score: {row['prediction_score']:.4f}\n"
+                    message += f"🔍 {row['pattern_date'].strftime('%Y-%m-%d')}: {row['stock_name']} - Score: {row['prediction_score']:.4f}\n"
                 message += "\n"
 
             send_telegram_message(telegram_token, telegram_chat_id, message)
@@ -782,10 +811,10 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
     successful_models = 0
     
     # 종목별로 그룹화
-    grouped_results = filtered_results.groupby('code_name')
+    grouped_results = filtered_results.groupby('stock_name')
     
     # 각 그룹의 데이터를 반복하며 종목별, 그룹별로 데이터를 로드하고 모델을 훈련
-    for code_name, group in tqdm(grouped_results, desc="Training models"):
+    for stock_name, group in tqdm(grouped_results, desc="Training models"):
         signal_dates = group['signal_date'].tolist()
         
         # 문자열 형태의 signal_dates를 datetime 객체로 변환
@@ -801,7 +830,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
                 print(f"Invalid date type: {date}")
     
         if not valid_signal_dates:
-            print(f"No valid signal dates for {code_name}")
+            print(f"No valid signal dates for {stock_name}")
             continue
         
         # 3개월(약 90일) 이상 차이나는 날짜로 그룹 분할
@@ -823,8 +852,8 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
             end_date = max(signal_group)  # 그룹의 마지막 날짜
             start_date = end_date - timedelta(days=1200)
             
-            print(f"\nTraining model for {code_name} - Group {group_idx+1}: {start_date} to {end_date}")
-            df = load_daily_craw_data(craw_db, code_name, start_date, end_date)
+            print(f"\nTraining model for {stock_name} - Group {group_idx+1}: {start_date} to {end_date}")
+            df = load_daily_craw_data(craw_db, stock_name, start_date, end_date)
             
             if df.empty:
                 continue
@@ -844,7 +873,7 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
             # 모델 평가 및 저장
             if model:
                 # 훈련 정보 출력
-                print(f"Model trained for {code_name} from {start_date} to {end_date}")
+                print(f"Model trained for {stock_name} from {start_date} to {end_date}")
                 
                 # 가장 좋은 모델을 선택하기 위해 성능 평가
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -854,9 +883,9 @@ def train_models(buy_list_db, craw_db, filtered_results, settings):
                 if accuracy > best_accuracy or best_model is None:
                     best_model = model
                     best_accuracy = accuracy
-                    print(f"New best model found for {code_name} with accuracy: {accuracy:.4f}")
+                    print(f"New best model found for {stock_name} with accuracy: {accuracy:.4f}")
             else:
-                print(f"Model training failed for {code_name}")
+                print(f"Model training failed for {stock_name}")
         
             total_models += 1
             if model:
@@ -924,7 +953,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
     
     # 각 종목별로 한 번만 데이터를 로드하고 처리
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), total=total_stock_items, desc="종목별 검증"):
-        table_name = row.code_name
+        table_name = row.stock_name
         print(f"\nProcessing {table_name} ({idx + 1}/{total_stock_items})")
         
         # 마지막 날짜 기준으로 1200일 전까지의 데이터를 한 번만 로드
@@ -967,7 +996,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
     if all_predictions:
         all_predictions_df = pd.concat(all_predictions, ignore_index=True)
     else:
-        all_predictions_df = pd.DataFrame(columns=['date', 'stock_code', 'Score'])
+        all_predictions_df = pd.DataFrame(columns=['date', 'stock_name', 'Score'])
     
     # 날짜별 및 종목별로 분류
     date_grouped_predictions = {}
@@ -985,7 +1014,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
         for _, row in stocks.iterrows():
             final_results.append({
                 'date': date,
-                'stock_code': row['stock_code'],
+                'stock_name': row['stock_name'],
                 'score': round(row['Score'], 4),
                 'rank': rank
             })
@@ -1003,18 +1032,18 @@ def validate_model(model, buy_list_db, craw_db, settings):
         for date, group in validation_results.groupby('date'):
             print(f"\nDate: {date.strftime('%Y-%m-%d')}")
             for _, row in group.iterrows():
-                print(f"  Rank {row['rank']}: {row['stock_code']} (Score: {row['score']:.4f})")
+                print(f"  Rank {row['rank']}: {row['stock_name']} (Score: {row['score']:.4f})")
         
         # 검증된 종목의 개수 출력
-        unique_stock_codes = validation_results['stock_code'].nunique()
-        print(f"\nNumber of unique stock codes found during validation: {unique_stock_codes}")
+        unique_stock_names = validation_results['stock_name'].nunique()
+        print(f"\nNumber of unique stock codes found during validation: {unique_stock_names}")
         
         # Validation 끝난 후 텔레그램 메시지 보내기
-        message = "Validation completed. Top 3 stocks by date:\n\n"
+        message = "Validation completed. Top 3 stocks by date: dense_xgboost_auto\n\n"
         for date, group in validation_results.groupby('date'):
             message += f"📅 {date.strftime('%Y-%m-%d')}:\n"
             for _, row in group.iterrows():
-                message += f"  #{row['rank']} {row['stock_code']} (Score: {row['score']:.4f})\n"
+                message += f"  #{row['rank']} {row['stock_name']} (Score: {row['score']:.4f})\n"
             message += "\n"
         
         message += f"Total unique dates: {validation_results['date'].nunique()}"
@@ -1026,7 +1055,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
     return validation_results
 
 
-def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, settings=None):
+def predict_pattern_with_score(model, df, stock_name, use_data_dates=False, settings=None):
     """
     패턴을 예측하고 예측 점수와 함께 반환합니다.
     """
@@ -1036,7 +1065,7 @@ def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, sett
         print('Predicting patterns')
         if model is None:
             print("Model is None, cannot predict patterns.")
-            return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+            return pd.DataFrame(columns=['date', 'stock_name', 'Score']), 0
             
         X = df[COLUMNS_TRAINING_DATA]
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
@@ -1109,21 +1138,21 @@ def predict_pattern_with_score(model, df, stock_code, use_data_dates=False, sett
                 best_pattern = recent_patterns.loc[recent_patterns['Score'].idxmax()]
                 best_score = best_pattern['Score']
                 
-                recent_patterns['stock_code'] = stock_code
-                result = recent_patterns[['date', 'stock_code', 'Score']]
+                recent_patterns['stock_name'] = stock_name
+                result = recent_patterns[['date', 'stock_name', 'Score']]
                 
                 # 결과와 최고 점수 반환
                 return result, best_score
             else:
-                return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+                return pd.DataFrame(columns=['date', 'stock_name', 'Score']), 0
                 
         except Exception as e:
             print(f"Error in date processing: {e}")
-            return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+            return pd.DataFrame(columns=['date', 'stock_name', 'Score']), 0
             
     except Exception as e:
         print(f'Error predicting patterns: {e}')
-        return pd.DataFrame(columns=['date', 'stock_code', 'Score']), 0
+        return pd.DataFrame(columns=['date', 'stock_name', 'Score']), 0
 
 def main():
     """메인 실행 함수"""

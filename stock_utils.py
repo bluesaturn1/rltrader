@@ -22,12 +22,12 @@ def get_stock_items(host, user, password, database):
         print("Connection successful.")
         
         # KOSPI 종목 가져오기
-        query_kospi = "SELECT code_name, code FROM stock_kospi"
+        query_kospi = "SELECT stock_name, code FROM stock_kospi"
         print(f"Executing query: {query_kospi}")
         df_kospi = pd.read_sql(query_kospi, connection)
         
         # KOSDAQ 종목 가져오기
-        query_kosdaq = "SELECT code_name, code FROM stock_kosdaq"
+        query_kosdaq = "SELECT stock_name, code FROM stock_kosdaq"
         print(f"Executing query: {query_kosdaq}")
         df_kosdaq = pd.read_sql(query_kosdaq, connection)
         
@@ -54,27 +54,27 @@ def filter_stocks(stock_items_df):
         pandas.DataFrame: 필터링된 종목 정보 DataFrame
     """
     filtered_stocks = []
-    stock_names = stock_items_df['code_name'].tolist()
+    stock_names = stock_items_df['stock_name'].tolist()
     
     for _, row in stock_items_df.iterrows():
-        code_name = row['code_name']
+        stock_name = row['stock_name']
         
         # 필터링 조건 체크
-        if code_name.endswith('2우B') or code_name.endswith('1우'):
-            print(f"Skipping excluded stock: {code_name}")
+        if stock_name.endswith('2우B') or stock_name.endswith('1우'):
+            print(f"Skipping excluded stock: {stock_name}")
             continue
         
         # 세 글자 이상인 종목에서 '우'로 끝났을 때 '우'를 제외한 이름이 이미 있는 경우 제외
-        if len(code_name) > 2 and code_name.endswith('우') and code_name[:-1] in stock_names:
-            print(f"Skipping excluded stock: {code_name}")
+        if len(stock_name) > 2 and stock_name.endswith('우') and stock_name[:-1] in stock_names:
+            print(f"Skipping excluded stock: {stock_name}")
             continue
         
         # 특정 이름이 포함된 종목 제외 (예: '리츠'가 포함된 종목 제외)
-        if '리츠' in code_name:
-            print(f"Skipping stock with specific name: {code_name}")
+        if '리츠' in stock_name:
+            print(f"Skipping stock with specific name: {stock_name}")
             continue
-        if '스팩' in code_name:
-            print(f"Skipping stock with specific name: {code_name}")
+        if '스팩' in stock_name:
+            print(f"Skipping stock with specific name: {stock_name}")
             continue
 
 
@@ -86,13 +86,34 @@ def filter_stocks(stock_items_df):
 def get_stock_items_from_db_manager(db_manager):
     """DBConnectionManager 객체를 사용하여 종목 목록을 가져옵니다."""
     try:
-        query = "SELECT code, code_name FROM stock_item_all"
+        query = "SELECT code, stock_name FROM stock_item_all"
         df = db_manager.execute_query(query)
         
         if df.empty:
             return []
             
-        return list(zip(df['code'], df['code_name']))
+        return list(zip(df['code'], df['stock_name']))
     except Exception as e:
         print(f"Error fetching stock items: {e}")
         return []
+
+        
+def load_daily_craw_data(db_manager, table, start_date, end_date):
+    try:
+        # 날짜 형식을 'yyyy-mm-dd'로 변경
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        end_date_str = end_date.strftime('%Y-%m-%d')
+        print(f"Loading data from {start_date_str} to {end_date_str} for table {table}")
+        
+        query = f"""
+            SELECT * FROM `{table}`
+            WHERE date >= '{start_date_str}' AND date <= '{end_date_str}'
+            ORDER BY date ASC
+        """
+        
+        df = db_manager.execute_query(query)
+        print(f"Data loaded from {start_date_str} to {end_date_str} for table {table}: {len(df)} rows")
+        return df
+    except Exception as e:
+        print(f"Error loading data from MySQL: {e}")
+        return pd.DataFrame()
