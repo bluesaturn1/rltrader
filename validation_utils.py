@@ -21,7 +21,7 @@ def process_and_report_validation_results(validation_results, settings):
     # Create performance DataFrame
     performance_df = evaluate_performance(validation_results, settings['craw_db'])
 
-    # Save performance_df to the database
+    # Save performance_df to the deep_learning database
     save_xgboost_predictions_to_db(performance_df, settings)
     
     # Send validation summary

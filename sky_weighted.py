@@ -826,6 +826,7 @@ def balanced_custom_split(X, y, test_size=0.2):
     
     return train_indices, test_indices
 
+
 def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
     try:
         print('Training model')
@@ -931,6 +932,117 @@ def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
         import traceback
         traceback.print_exc()
         return None
+
+# # 모델학습시 클래스별가중치부여
+# def train_model(X, y, use_saved_params=True, param_file='best_params.pkl'):
+#     try:
+#         print('Training model')
+#         X = X.replace([np.inf, -np.inf], np.nan).dropna()
+#         y = y[X.index]
+        
+#         # 클래스 분포 출력
+#         print("Original class distribution:")
+#         print(y.value_counts().sort_index())
+        
+#         # 클래스 라벨 연속적으로 매핑 (불연속 클래스 처리)
+#         unique_classes = np.sort(y.unique())
+#         n_classes = len(unique_classes)
+#         print(f"Original unique classes: {unique_classes}")
+        
+#         # 클래스 라벨이 불연속적인 경우 (예: [0, 3]만 있는 경우)
+#         class_mapping = None
+#         if len(unique_classes) > 1 and not np.array_equal(unique_classes, np.arange(len(unique_classes))):
+#             print("불연속 클래스 라벨 감지. 연속적인 라벨로 매핑합니다.")
+#             class_mapping = {old_cls: new_cls for new_cls, old_cls in enumerate(unique_classes)}
+#             print(f"클래스 매핑: {class_mapping}")
+#             y_mapped = y.map(class_mapping)
+            
+#             # 매핑 결과 확인
+#             print("매핑 후 클래스 분포:")
+#             print(y_mapped.value_counts().sort_index())
+            
+#             # 매핑된 y를 사용
+#             y = y_mapped
+#             n_classes = len(class_mapping)
+        
+#         # 클래스 분포 확인
+#         for cls in unique_classes:
+#             class_count = (y == cls).sum()
+#             print(f"Class {cls}: {class_count} samples")
+        
+#         # 저장된 파라미터 사용 여부
+#         if use_saved_params and os.path.exists(param_file):
+#             try:
+#                 best_params = joblib.load(param_file)
+#                 print(f"Loaded parameters from {param_file}: {best_params}")
+#             except Exception as e:
+#                 print(f"Error loading parameters: {e}. Using default parameters.")
+#                 best_params = {}
+                
+#             # 다중 클래스 모델 초기화
+#             model = xgb.XGBClassifier(
+#                 random_state=42,
+#                 n_estimators=best_params.get('n_estimators', 30),
+#                 max_depth=best_params.get('max_depth', 1),
+#                 learning_rate=best_params.get('learning_rate', 0.01),
+#                 subsample=best_params.get('subsample', 0.5),
+#                 colsample_bytree=best_params.get('colsample_bytree', 0.5),
+#                 min_child_weight=best_params.get('min_child_weight', 5),
+#                 reg_alpha=best_params.get('reg_alpha', 10.0),
+#                 reg_lambda=best_params.get('reg_lambda', 10.0),
+#                 gamma=best_params.get('gamma', 1.0),
+#                 objective='multi:softmax',
+#                 num_class=n_classes,
+#                 eval_metric='mlogloss'
+#             )
+            
+#             print(f"모델 초기화 완료. 클래스 수: {n_classes}")
+#         else:
+#             # 새로운 파라미터로 모델 초기화
+#             model = xgb.XGBClassifier(
+#                 random_state=42,
+#                 objective='multi:softmax',
+#                 num_class=max(4, int(y.max()) + 1),
+#                 eval_metric='mlogloss'
+#             )
+#             print("Model created with default parameters for multi-class classification.")
+        
+#         # 클래스 매핑 정보 저장
+#         model.class_mapping_ = class_mapping
+            
+#         # 모델 학습 부분
+#         if len(np.unique(y)) > 1:
+#             # 클래스 분포 출력
+#             print("Class distribution before augmentation:")
+#             print(y.value_counts().sort_index())
+            
+#             # TimeGAN 증강 적용
+#             try:
+#                 print("Applying time series augmentation to balance training data...")
+#                 X_resampled, y_resampled = advanced_time_series_augmentation(X, y, aug_ratio=4)
+#                 print(f"Class distribution after augmentation: {pd.Series(y_resampled).value_counts().sort_index()}")
+                
+#                 # 클래스 가중치 설정
+#                 class_weights = {0: 1, 1: 1, 2: 2}  # 클래스 2에 가중치 2 부여
+#                 sample_weights = [class_weights[cls] for cls in y_resampled]
+                
+#                 # 증강된 데이터와 가중치를 사용하여 모델 학습
+#                 model.fit(X_resampled, y_resampled, sample_weight=sample_weights)
+#             except Exception as e:
+#                 print(f"Augmentation failed: {e}. Using original data.")
+#                 # 오류 시 원본 데이터로 모델 학습
+#                 model.fit(X, y)
+#         else:
+#             print("Only one class in training data. Using default weighting.")
+#             model.fit(X, y)
+        
+#         return model
+        
+#     except Exception as e:
+#         print(f"Error during model training: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         return None
 
 def parse_date_flexible(date_str_or_obj):
     """다양한 형식의 날짜를 datetime.date 객체로 변환"""
@@ -1712,8 +1824,7 @@ def optimize_threshold(model, X_val, y_val, metric='f1'):
     
     return best_threshold
 
-
-
+# 가중치 부여 예측 확률에 클래스별 가중치를 곱하여 클래스 2의 예측을 더 강조합니다.
 def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
@@ -1728,22 +1839,28 @@ def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
         # 무한대 값이나 너무 큰 값 제거
         X = X.replace([np.inf, -np.inf], np.nan).dropna()
         
-        # 클래스 예측 - 이제 0 또는 1만 예측됨
+        # 클래스 예측
         predictions = model.predict(X)
         
-        # 예측 확률 - 이진 분류에서는 클래스 1의 확률만 필요
+        # 예측 확률
         if hasattr(model, 'predict_proba'):
-            prediction_probs = model.predict_proba(X)[:, 1]  # 클래스 1(시그널 있음)의 확률
+            prediction_probs = model.predict_proba(X)
             
-            # 모델에 저장된 최적 임계값 사용 (없으면 기본값 0.5)
-            threshold = getattr(model, 'threshold_', 0.5)
-            print(f"Using optimal threshold: {threshold}")
+            # 각 샘플에 대해 가장 높은 확률을 가진 클래스 선택
+            max_probs = np.max(prediction_probs, axis=1)
             
-            predictions = (prediction_probs >= threshold).astype(int)
+            # 해당 클래스의 인덱스 저장
+            predicted_classes = np.argmax(prediction_probs, axis=1)
             
             df = df.loc[X.index]
-            df['Prediction'] = predictions
-            df['confidence'] = prediction_probs  # 시그널 확률 저장
+            df['Prediction'] = predicted_classes
+            df['confidence'] = max_probs  # 가장 높은 확률 저장
+            
+            # 클래스별 가중치 부여
+            class2_weight = 1.5  # 클래스 2에 대한 가중치
+            for i in range(len(predicted_classes)):
+                if predicted_classes[i] == 2:
+                    df.loc[df.index[i], 'confidence'] *= class2_weight
         else:
             df = df.loc[X.index]
             df['Prediction'] = predictions
@@ -1752,7 +1869,6 @@ def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
         print(f'Patterns predicted: {len(predictions)} total predictions')
         print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
         
-        # 날짜 형식을 안전하게 변환
         try:
             # MySQL의 YYYYMMDD 형식 문자열을 datetime으로 변환
             if df['date'].dtype == 'object':
@@ -1778,9 +1894,8 @@ def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
             
             print(f"Validation period: {validation_start_date} to {validation_end_date}")
             
-            # 검증 기간 동안의 패턴 필터링 (Prediction이 0보다 큰 경우만)
+            # 검증 기간 동안의 패턴 필터링
             recent_patterns = df[
-                (df['Prediction'] > 0) & 
                 (df['date'] >= validation_start_date) & 
                 (df['date'] <= validation_end_date)
             ].copy()
@@ -1789,7 +1904,7 @@ def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
             
             if not recent_patterns.empty:
                 recent_patterns['stock_name'] = stock_name
-                result = recent_patterns[['date', 'stock_name', 'confidence']]  # confidence 컬럼 추가
+                result = recent_patterns[['date', 'stock_name', 'Prediction', 'confidence']]  # confidence 컬럼 추가
                 print(f'Found patterns for {stock_name} with confidence:')
                 print(result)
                 return result
@@ -1809,7 +1924,106 @@ def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
         import traceback
         print(f'Stack trace:\n{traceback.format_exc()}')
         return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
-
+# #  임계값조정
+# def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
+#     # 함수 내에서 자주 사용하는 설정은 지역 변수로 추출
+#     COLUMNS_TRAINING_DATA = settings['COLUMNS_TRAINING_DATA']
+    
+#     try:
+#         print('Predicting patterns')
+#         if model is None:
+#             print("Model is None, cannot predict patterns.")
+#             return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
+#         X = df[COLUMNS_TRAINING_DATA]  # 지역 변수로 간결하게 사용
+     
+#         # 무한대 값이나 너무 큰 값 제거
+#         X = X.replace([np.inf, -np.inf], np.nan).dropna()
+        
+#         # 클래스 예측
+#         predictions = model.predict(X)
+        
+#         # 예측 확률
+#         if hasattr(model, 'predict_proba'):
+#             prediction_probs = model.predict_proba(X)
+            
+#             # 각 샘플에 대해 가장 높은 확률을 가진 클래스 선택
+#             max_probs = np.max(prediction_probs, axis=1)
+            
+#             # 해당 클래스의 인덱스 저장
+#             predicted_classes = np.argmax(prediction_probs, axis=1)
+            
+#             df = df.loc[X.index]
+#             df['Prediction'] = predicted_classes
+#             df['confidence'] = max_probs  # 가장 높은 확률 저장
+            
+#             # 클래스별 임계값 조정
+#             class2_threshold = 0.7  # 클래스 2에 대한 임계값
+#             for i in range(len(predicted_classes)):
+#                 if predicted_classes[i] == 2 and max_probs[i] < class2_threshold:
+#                     df['Prediction'].iloc[i] = 0  # 임계값 미만이면 클래스 0으로 변경
+#         else:
+#             df = df.loc[X.index]
+#             df['Prediction'] = predictions
+#             df['confidence'] = predictions
+            
+#         print(f'Patterns predicted: {len(predictions)} total predictions')
+#         print(f'Patterns with value > 0: {(predictions > 0).sum()} matches found')
+        
+#         try:
+#             # MySQL의 YYYYMMDD 형식 문자열을 datetime으로 변환
+#             if df['date'].dtype == 'object':
+#                 # YYYYMMDD 형식의 문자열을 datetime으로 변환
+#                 df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
+#             elif not pd.api.types.is_datetime64_any_dtype(df['date']):
+#                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            
+#             # NaT 값 제거
+#             df = df.dropna(subset=['date'])
+#             print(f"Date range in data: {df['date'].min()} to {df['date'].max()}")
+            
+#             # 검증 기간 설정
+#             if use_data_dates:
+#                 # 훈련 모드: 데이터의 최신 날짜 이후로 예측 검증 기간 설정
+#                 max_date = df['date'].max()
+#                 validation_start_date = max_date + pd.Timedelta(days=1)
+#                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
+#             else:
+#                 # 예측 모드: cf.py에 설정된 검증 기간 사용 (자동 조정 없음)
+#                 validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+#                 validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
+            
+#             print(f"Validation period: {validation_start_date} to {validation_end_date}")
+            
+#             # 검증 기간 동안의 패턴 필터링
+#             recent_patterns = df[
+#                 (df['date'] >= validation_start_date) & 
+#                 (df['date'] <= validation_end_date)
+#             ].copy()
+            
+#             print(f'Filtered patterns in validation period: {len(recent_patterns)}')
+            
+#             if not recent_patterns.empty:
+#                 recent_patterns['stock_name'] = stock_name
+#                 result = recent_patterns[['date', 'stock_name', 'Prediction', 'confidence']]  # confidence 컬럼 추가
+#                 print(f'Found patterns for {stock_name} with confidence:')
+#                 print(result)
+#                 return result
+#             else:
+#                 print(f'No patterns found for {stock_name} in validation period')
+#                 return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
+                
+#         except Exception as e:
+#             print(f"Error in date processing: {e}")
+#             print(f"Debug info - df['date'] sample: {df['date'].head()}")
+#             print(f"Debug info - validation dates: {validation_start_date}, validation_end_date: {validation_end_date}")
+#             return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
+            
+#     except Exception as e:
+#         print(f'Error predicting patterns: {e}')
+#         print(f'Error type: {type(e).__name__}')
+#         import traceback
+#         print(f'Stack trace:\n{traceback.format_exc()}')
+#         return pd.DataFrame(columns=['date', 'stock_name', 'confidence'])
 
 
 def evaluate_performance(df, performance_start_date, performance_end_date):
