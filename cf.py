@@ -19,7 +19,7 @@ FIREARROW_RESULTS_TABLE = 'firearrow_results_2000'  # finding & training table
 FINDING_SKYROCKET_TABLE = 'finding_skyrocket'  # finding & training table
 FINDING_RESULTS_TABLE = 'dense_results_2013'  # finding & training table
 FINDING_FIREARROW_TABLE = 'firearrow_results'  # finding & training table
-DENSE_UP_RESULTS_TABLE = 'dense_results_2013'  # finding & training table
+DENSE_UP_RESULTS_TABLE = 'dense_up_results'  # finding & training table
 DENSE_UPDOWN_RESULTS_TABLE = 'dense_updown_results'  # finding & training table
 DENSE_PPO_TABLE = 'dense_ppo'  # finding & training table
 RECOGNITION_PERFORMANCE_TABLE = 'dense_recognition_performance'  # recognition performance table
@@ -47,8 +47,8 @@ PREDICTION_VALIDATION_DAYS = 30  # 최신 데이터 이후 30일간의 예측 �
 # LSTM
 LSTM_PREDICTION_LIMIT = 0.1
 # 검증 설정
-VALIDATION_START_DATE = '2023-03-01'  # 검증 기간 시작 날짜 설정
-VALIDATION_END_DATE = '2023-03-31'  # 검증 기간 종료 날짜 설정
+VALIDATION_START_DATE = '2023-08-01'  # 검증 기간 시작 날짜 설정
+VALIDATION_END_DATE = '2023-08-31'  # 검증 기간 종료 날짜 설정
 # 오늘 기준 검증
 # 현재 날짜 가져오기
 now = datetime.now()
