@@ -1613,11 +1613,24 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
                 for _, row in top_stocks.iterrows():
                     message += f"{row['stock_name']} | {row['prediction']:.2f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
                 send_telegram_message(telegram_token, telegram_chat_id, message)
+            
+            # 전체 검증 기간에 대한 성과 요약을 별도 메시지로 전송
+            summary_message = f"\n===== 전체 검증 기간 성과 요약 =====\n"
+            summary_message += f"총 예측 종목 수: {len(performance_df)}개\n\n"
+            summary_message += f"최대 이익률: {max_return:.2f}%\n"
+            summary_message += f"최대 손실률: {worst_max_loss:.2f}%\n"
+            summary_message += f"평균 예상 수익률: {avg_risk_adjusted_return:.2f}%\n"
+            summary_message += f"평균 최대 이익률: {avg_return:.2f}%\n"
+            summary_message += f"평균 최대 손실률: {avg_max_loss:.2f}%\n"
+            
+            # 전체 성과 요약 메시지 전송
+            send_telegram_message(telegram_token, telegram_chat_id, summary_message)
+            
             # DB에 저장
             if buy_list_db is not None:
                 # LSTM 결과 테이블에 저장 (기존 performance_table 대신 results_table 사용)
-                performance_table = 'dense_lstm_performance'
-                save_performance_to_db(performance_df, buy_list_db, performance_table)
+                # performance_table = 'dense_lstm_performance'
+                # save_performance_to_db(performance_df, buy_list_db, performance_table)
                 save_lstm_predictions_to_db(buy_list_db, performance_df, model_name)
         except Exception as e:
             print(f"분석 중 오류 발생: {e}")
