@@ -64,4 +64,4 @@ VALIDATION_START_DATE_AUTO = validation_start.strftime('%Y-%m-%d')
 VALIDATION_END_DATE_AUTO = validation_end.strftime('%Y-%m-%d')
 
 # VALIDATION_START_DATE_AUTO = '20230116'
-# VALIDATION_END_DATE_AUTO = '20230228'
+# VALIDATION_END_DATE_AUTO = 
