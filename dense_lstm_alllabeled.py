@@ -1608,6 +1608,11 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
             
             print("\n===== 날짜별 Prediction 값 기준 상위 3개 종목 성과 =====")
             
+            
+            # 여러 날짜를 모아서 보내기 위한 변수들
+            batch_size = 8  # 한 번에 보낼 날짜 수 (5 또는 7로 설정)
+            messages_batch = []
+
             for result in results:
                 date = result['date']
                 top_stocks = result['top_stocks']
@@ -1616,8 +1621,18 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
                 message = f"날짜: {date}\n"
                 message += "종목명 | Prediction | 최대 수익률 | 최대 손실 | 위험 조정 수익률\n"
                 for _, row in top_stocks.iterrows():
-                    message += f"{row['stock_name']} | {row['prediction']:.2f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
-                send_telegram_message(telegram_token, telegram_chat_id, message)
+                    message += f"{row['stock_name']} | {row['prediction']:.4f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
+                # 메시지를 배치에 추가
+                messages_batch.append(message)
+                
+                # 지정된 개수만큼 모였거나 마지막 결과인 경우 메시지 전송
+                if len(messages_batch) >= batch_size or i == len(results) - 1:
+                    # 모아둔 메시지를 하나로 합침
+                    combined_message = "\n\n".join(messages_batch)
+                    # 텔레그램으로 전송
+                    send_telegram_message(telegram_token, telegram_chat_id, combined_message)
+                    # 배치 초기화
+                    messages_batch = []
             
             # 전체 검증 기간에 대한 성과 요약을 별도 메시지로 전송
             summary_message = f"\n===== 전체 검증 기간 성과 요약 =====\n"
