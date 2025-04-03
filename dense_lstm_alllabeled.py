@@ -1593,6 +1593,11 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
         max_return = performance_df['max_return'].max()
         min_return = performance_df['max_return'].min()
         
+        # 추가: 누락된 변수들 정의
+        worst_max_loss = performance_df['max_loss'].min()  # 최대 손실은 가장 작은 값(음수)
+        avg_max_loss = performance_df['max_loss'].mean()  # 평균 최대 손실
+        avg_risk_adjusted_return = performance_df['risk_adjusted_return'].mean()  # 평균 위험 조정 수익률
+        
         print(f"평균 최대 수익률: {avg_return:.2f}%")
         print(f"최고 수익률: {max_return:.2f}%")
         print(f"최저 수익률: {min_return:.2f}%")
