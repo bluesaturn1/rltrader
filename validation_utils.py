@@ -160,41 +160,71 @@ def send_validation_summary(validation_results, performance_df, settings):
         print(f"최고 수익률: {max_return:.2f}%")
         print(f"최고 손실률: {max_loss:.2f}%")
         
-        # 텔레그램 메시지 생성
-        message = "=== 검증 결과 ===\n"
-               
         # 날짜별 상위 종목 분석
         try:
             results, summaries = analyze_top_performers_by_date(performance_df, top_n=3)
             
-            message += "\n===== 날짜별 상위 3개 종목 =====\n"
-            for result in results:
+            # 여러 날짜를 모아서 보내기 위한 변수들
+            batch_size = 8  # 한 번에 보낼 날짜 수 (5 또는 7로 설정)
+            messages_batch = []
+            batch_counter = 0
+            
+            for i, result in enumerate(results):
                 date = result['date']
                 top_stocks = result['top_stocks']
-                message += f"\n📅날짜: {date}\n"
-                message += "종목명 | Confidence | 최대 수익률 | 최대 손실 | 예상 수익률 | 위험 조정 수익률\n"
+                
+                # 현재 날짜 정보 메시지 생성
+                current_message = f"\n📅날짜: {date}\n"
+                current_message += "종목명 | Confidence | 최대 수익률 | 최대 손실 | 예상 수익률 | 위험 조정 수익률\n"
                 for _, row in top_stocks.iterrows():
-                    message += (
+                    current_message += (
                         f"{row['stock_name']} | {row['confidence']:.4f} | "
                         f"{row['max_return']:.2f}% | {row['max_loss']:.2f}% | "
                         f"{row['estimated_profit_rate']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
                     )
+                
+                # 배치에 현재 메시지 추가
+                messages_batch.append(current_message)
+                batch_counter += 1
+                
+                # 배치 크기에 도달하거나 마지막 결과인 경우 메시지 전송
+                if batch_counter >= batch_size or i == len(results) - 1:
+                    # 배치 메시지 생성 및 전송
+                    batch_message = "=== 날짜별 상위 3개 종목 ===\n" + "\n".join(messages_batch)
+                    send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], batch_message)
+                    
+                    # 배치 초기화
+                    messages_batch = []
+                    batch_counter = 0
+            
+            # 검증 결과 요약 메시지 별도로 전송
+            summary_message = ("\n=== 검증 결과 요약 ===\n"
+                f"모델 : {settings['model_name']}\n"
+                f"총 예측 수: {total_predictions}\n"
+                f"성과 평가 수: {total_performance}\n"
+                f"평균 최대 수익률: {avg_return:.2f}%\n"
+                f"평균 risk adjusted return: {avg_risk_adjusted_return:.2f}%\n"
+                f"최고 수익률: {max_return:.2f}%\n"
+                f"최저 손실률: {max_loss:.2f}%\n"
+            )
+            send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], summary_message)
+            
         except Exception as e:
             print(f"Error analyzing top performers: {e}")
             import traceback
             traceback.print_exc()
-        
-        message += ("\n=== 검증 결과 요약 ===\n"
-            f"모델 : {settings['model_name']}\n"
-            f"총 예측 수: {total_predictions}\n"
-            f"성과 평가 수: {total_performance}\n"
-            f"평균 최대 수익률: {avg_return:.2f}%\n"
-            f"평균 risk adjusted return {avg_risk_adjusted_return:.2f}%\n"
-            f"최고 수익률: {max_return:.2f}%\n"
-            f"최저 손실률: {max_loss:.2f}%\n"
-        )
-        # 텔레그램 메시지 전송
-        send_long_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
+            
+            # 오류 발생 시 기본 요약 메시지만 전송
+            summary_message = ("\n=== 검증 결과 요약 ===\n"
+                f"모델 : {settings['model_name']}\n"
+                f"총 예측 수: {total_predictions}\n"
+                f"성과 평가 수: {total_performance}\n"
+                f"평균 최대 수익률: {avg_return:.2f}%\n"
+                f"평균 risk adjusted return: {avg_risk_adjusted_return:.2f}%\n"
+                f"최고 수익률: {max_return:.2f}%\n"
+                f"최저 손실률: {max_loss:.2f}%\n"
+            )
+            send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], summary_message)
 
     else:
         print("성과 데이터가 비어있습니다.")
@@ -205,6 +235,7 @@ def send_validation_summary(validation_results, performance_df, settings):
             "성과 데이터가 비어있습니다.\n"
         )
         send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
+
 
 def analyze_top_performers_by_date(performance_df, top_n=3):
     """날짜별로 상위 성과를 보인 종목을 분석"""

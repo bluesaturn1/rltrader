@@ -1601,39 +1601,44 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
         print(f"평균 최대 수익률: {avg_return:.2f}%")
         print(f"최고 수익률: {max_return:.2f}%")
         print(f"최저 수익률: {min_return:.2f}%")
-        
+
         try:
             # 날짜별 상위 종목 분석
             results, summaries = analyze_top_performers_by_date(performance_df, top_n=3)
             
             print("\n===== 날짜별 Prediction 값 기준 상위 3개 종목 성과 =====")
             
-            
             # 여러 날짜를 모아서 보내기 위한 변수들
-            batch_size = 8  # 한 번에 보낼 날짜 수 (5 또는 7로 설정)
+            batch_size = 5  # 한 번에 보낼 날짜 수 (5 또는 7로 설정)
             messages_batch = []
-
-            for result in results:
+            batch_counter = 0
+            
+            # 잘못된 방식: for i, result in results:
+            # 수정된 방식: 
+            for i, result in enumerate(results):
                 date = result['date']
                 top_stocks = result['top_stocks']
                 print(f"\n날짜: {date} - Prediction 기준 상위 3개 종목")
                 print(top_stocks[['stock_name', 'prediction', 'max_return', 'max_loss', 'risk_adjusted_return']])
-                message = f"날짜: {date}\n"
+                message = f"📅날짜: {date}\n"
                 message += "종목명 | Prediction | 최대 수익률 | 최대 손실 | 위험 조정 수익률\n"
                 for _, row in top_stocks.iterrows():
-                    message += f"{row['stock_name']} | {row['prediction']:.4f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
+                    message += f"{row['stock_name']} | {row['prediction']:.2f} | {row['max_return']:.2f}% | {row['max_loss']:.2f}% | {row['risk_adjusted_return']:.2f}%\n"
+                
                 # 메시지를 배치에 추가
                 messages_batch.append(message)
+                batch_counter += 1
                 
                 # 지정된 개수만큼 모였거나 마지막 결과인 경우 메시지 전송
-                if len(messages_batch) >= batch_size or i == len(results) - 1:
-                    # 모아둔 메시지를 하나로 합침
-                    combined_message = "\n\n".join(messages_batch)
-                    # 텔레그램으로 전송
-                    send_telegram_message(telegram_token, telegram_chat_id, combined_message)
+                if batch_counter >= batch_size or i == len(results) - 1:
+                    # 배치 메시지 생성 및 전송
+                    batch_message = "=== 날짜별 상위 3개 종목 ===\n" + "\n".join(messages_batch)
+                    send_telegram_message(telegram_token, telegram_chat_id, batch_message)
+                    
                     # 배치 초기화
                     messages_batch = []
-            
+                    batch_counter = 0
+                        
             # 전체 검증 기간에 대한 성과 요약을 별도 메시지로 전송
             summary_message = f"\n===== 전체 검증 기간 성과 요약 =====\n"
             summary_message += f"총 예측 종목 수: {len(performance_df)}개\n\n"
@@ -1648,9 +1653,6 @@ def send_validation_summary(validation_results, performance_df, telegram_token, 
             
             # DB에 저장
             if buy_list_db is not None:
-                # LSTM 결과 테이블에 저장 (기존 performance_table 대신 results_table 사용)
-                # performance_table = 'dense_lstm_performance'
-                # save_performance_to_db(performance_df, buy_list_db, performance_table)
                 save_lstm_predictions_to_db(buy_list_db, performance_df, model_name)
         except Exception as e:
             print(f"분석 중 오류 발생: {e}")
