@@ -60,14 +60,14 @@ def filter_stocks(stock_items_df):
         stock_name = row['stock_name']
         
         # 필터링 조건 체크
-        if stock_name.endswith('2우B') or stock_name.endswith('1우'):
-            print(f"Skipping excluded stock: {stock_name}")
-            continue
+        # if stock_name.endswith('2우B') or stock_name.endswith('1우'):
+        #     print(f"Skipping excluded stock: {stock_name}")
+        #     continue
         
         # 세 글자 이상인 종목에서 '우'로 끝났을 때 '우'를 제외한 이름이 이미 있는 경우 제외
-        if len(stock_name) > 2 and stock_name.endswith('우') and stock_name[:-1] in stock_names:
-            print(f"Skipping excluded stock: {stock_name}")
-            continue
+        # if len(stock_name) > 2 and stock_name.endswith('우') and stock_name[:-1] in stock_names:
+        #     print(f"Skipping excluded stock: {stock_name}")
+        #     continue
         
         # 특정 이름이 포함된 종목 제외 (예: '리츠'가 포함된 종목 제외)
         if '리츠' in stock_name:
@@ -76,7 +76,9 @@ def filter_stocks(stock_items_df):
         if '스팩' in stock_name:
             print(f"Skipping stock with specific name: {stock_name}")
             continue
-
+        if 'ANKOR' in stock_name:
+            print(f"Skipping stock with specific name: {stock_name}")
+            continue
 
         filtered_stocks.append(row)
     
