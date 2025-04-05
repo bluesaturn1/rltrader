@@ -23,7 +23,7 @@ import pickle
 import tensorflow as tf
 from itertools import islice
 from sklearn.model_selection import TimeSeriesSplit
-
+import validation_utils
 # 파일 상단의 import 섹션에 추가
 
 
@@ -1666,6 +1666,16 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
     validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
     validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
 
+    # Initialize settings dictionary here
+    settings = {
+        'model_name': 'fire_lstm_all_labeled',
+        'buy_list_db': buy_list_db,
+        'craw_db': craw_db,
+        'telegram_token': cf.TELEGRAM_BOT_TOKEN,
+        'telegram_chat_id': cf.TELEGRAM_CHAT_ID,
+        'results_table': results_table
+    }
+
     stock_items = get_stock_items(host, user, password, database_buy_list)
     total_stock_items = len(stock_items)
     print(f"\n전체 종목 수: {total_stock_items}")
@@ -1693,12 +1703,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
         
         print(f"날짜별 상위 5개 종목 필터링 후 총 결과: {len(validation_results)}개")
         
-        # 4. 필터링된 날짜-종목 조합에 대해 성능 평가
-        performance_df = evaluate_performance(validation_results, craw_db)
-        
-        # 5. 결과 요약 및 전송
-        send_validation_summary(validation_results, performance_df, telegram_token, telegram_chat_id, results_table, buy_list_db, model_name)
-        
+        validation_utils.process_and_report_validation_results(validation_results,settings)
     else:
         print("예측 결과가 없습니다.")
 

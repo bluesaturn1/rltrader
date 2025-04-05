@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from telegram_utils import send_telegram_message, send_long_telegram_message  # 텔레그램 유틸리티 임포트
 from tqdm import tqdm
 from stock_utils import load_daily_craw_data  
@@ -22,7 +23,7 @@ def process_and_report_validation_results(validation_results, settings):
     performance_df = evaluate_performance(validation_results, settings['craw_db'])
 
     # Save performance_df to the deep_learning database
-    save_xgboost_predictions_to_db(performance_df, settings)
+    save_performance_to_deeplearning(performance_df, settings)
     
     # Send validation summary
     send_validation_summary(validation_results, performance_df, settings)
@@ -96,7 +97,7 @@ def evaluate_performance(validation_results, craw_db):
             print(f"No data available for {stock_name} after {pattern_date}. Including with 0 return.")
             performance_results.append({
                 'stock_name': stock_name,  # stock_name -> stock_name
-                'pattern_date': pattern_date,
+                'date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
                 'max_return': 0.0,  # 데이터가 없는 경우 0 반환
@@ -121,7 +122,7 @@ def evaluate_performance(validation_results, craw_db):
                 
             performance_results.append({
                 'stock_name': stock_name,  # stock_name -> stock_name
-                'pattern_date': pattern_date,
+                'date': pattern_date,
                 'start_date': performance_start_date,
                 'end_date': performance_end_date,
                 'max_return': round(max_return, 2),  # 소수점 2자리로 반올림
@@ -237,20 +238,21 @@ def send_validation_summary(validation_results, performance_df, settings):
         send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
 
 
+
 def analyze_top_performers_by_date(performance_df, top_n=3):
     """날짜별로 상위 성과를 보인 종목을 분석"""
     try:
-        # 'prediction' 컬럼이 있는지 확인
-        if 'prediction' not in performance_df.columns:
-            print("Error: 'prediction' column is missing in performance_df.")
+        # 'date' 컬럼이 있는지 확인
+        if 'date' not in performance_df.columns:
+            print("Error: 'date' column is missing in performance_df.")
             return [], pd.DataFrame()
         
-        # 날짜별로 그룹화하기 전에 stock_name과 pattern_date 기준으로 중복 제거
-        performance_df = performance_df.drop_duplicates(subset=['stock_name', 'pattern_date'])
+        # 날짜별로 그룹화하기 전에 stock_name과 date 기준으로 중복 제거
+        performance_df = performance_df.drop_duplicates(subset=['stock_name', 'date'])
         
         # 날짜별로 그룹화
-        performance_df['pattern_date'] = pd.to_datetime(performance_df['pattern_date'])
-        date_grouped = performance_df.groupby(performance_df['pattern_date'].dt.date)
+        performance_df['date'] = pd.to_datetime(performance_df['date'])
+        date_grouped = performance_df.groupby(performance_df['date'].dt.date)
         
         results = []
         date_summaries = []
@@ -259,133 +261,73 @@ def analyze_top_performers_by_date(performance_df, top_n=3):
         for date, group in date_grouped:
             print(f"\n날짜: {date} - Prediction 기준 상위 {top_n}개 종목")
             # prediction 기준 상위 종목 선택
-            top_stocks = group.nlargest(top_n, 'prediction')
-            
-            # 필요한 컬럼이 있는지 확인하고, 없는 경우 0으로 채우기
-            if 'risk_adjusted_return' not in top_stocks.columns:
-                print("Warning: 'risk_adjusted_return' column not found in top_stocks. Filling with 0.")
-                top_stocks['risk_adjusted_return'] = 0  # 또는 적절한 기본값
-            
-            print(top_stocks[['stock_name', 'prediction', 'max_return', 'max_loss', 'estimated_profit_rate', 'risk_adjusted_return']])
-            
+            top_stocks = group.nlargest(top_n, 'confidence')
+            print(f"날짜: {date} - 상위 {top_n}개 종목:\n{top_stocks}")  # 추가된 로그 메시지
             # 날짜별 요약 통계
             date_summary = {
                 'date': date,
                 'total_patterns': len(group),
-                'avg_risk_adjusted_return': group['estimated_profit_rate'].mean(),  # 수정됨
-                'avg_max_return': group['max_return'].mean(),
-                'avg_max_loss': group['max_loss'].mean(),
+                'avg_risk_adjusted_return': group['risk_adjusted_return'].mean(),
+                'avg_max_return': group['estimated_profit_rate'].mean(),
                 'top_performer': top_stocks.iloc[0]['stock_name'] if len(top_stocks) > 0 else None,
-                'top_return': top_stocks.iloc[0]['estimated_profit_rate'] if len(top_stocks) > 0 else None  # 수정됨
+                'top_return': top_stocks.iloc[0]['risk_adjusted_return'] if len(top_stocks) > 0 else None
             }
             
             date_summaries.append(date_summary)
             results.append({'date': date, 'top_stocks': top_stocks})
         
         return results, pd.DataFrame(date_summaries)
-        
     except Exception as e:
-        print(f'Error analyzing top performers: {e}')
+        print(f"Error analyzing top performers: {e}")
         import traceback
         traceback.print_exc()
         return [], pd.DataFrame()
 
-def save_xgboost_predictions_to_db(predictions_df, settings):
-    """XGBoost 예측 결과를 deep_learning 테이블에 저장합니다."""
+def save_performance_to_deeplearning(predictions_df, settings):
+    """예측 결과를 deep_learning 테이블에 저장합니다."""
     try:
+        # Get db_manager and model_name from settings
         db_manager = settings['buy_list_db']
-        # 필요한 컬럼만 추출하고 테이블 형식에 맞게 컬럼명 변경
-        required_columns = ['pattern_date', 'stock_name', 'estimated_profit_rate']
+        model_name = settings.get('model_name', 'xgboost')
         
-        # 'risk_adjusted_return' 컬럼이 있으면 추가
-        if 'risk_adjusted_return' in predictions_df.columns:
-            required_columns.append('risk_adjusted_return')
-        else:
-            print("Warning: 'risk_adjusted_return' column not found in predictions_df.")
+        # 데이터베이스 연결 상태 확인
+        if not db_manager.engine:
+            print("Database connection is not available.")
+            return False
+
+        # 필요한 컬럼 추출 및 이름 변경
+        dl_data = predictions_df.copy()
         
-        # prediction과 confidence 컬럼이 있는지 확인
-        has_prediction = 'prediction' in predictions_df.columns
-        has_confidence = 'confidence' in predictions_df.columns
+        # 모델 이름 설정
+        method_name = model_name
+        dl_data['method'] = method_name
         
-        # 필요한 컬럼만 선택
-        dl_data = predictions_df[required_columns].copy()
+        # confidence 값 설정: confidence와 prediction 중 0이 아닌 값을 선택
+        dl_data['confidence'] = dl_data.apply(
+            lambda row: row.get('confidence', 0) if row.get('confidence', 0) != 0 else row.get('prediction', 0), axis=1
+        )
         
-        # prediction과 confidence 중 0이 아닌 값을 선택하여 confidence 컬럼에 저장
-        if has_prediction and has_confidence:
-            # 둘 다 있는 경우, 0이 아닌 값 우선 사용
-            dl_data['confidence'] = predictions_df.apply(
-                lambda row: row['confidence'] if has_confidence and row['confidence'] != 0 
-                            else (row['prediction'] if has_prediction else 0), 
-                axis=1
-            )
-        elif has_prediction:
-            # prediction만 있는 경우
-            dl_data['confidence'] = predictions_df['prediction']
-        elif has_confidence:
-            # confidence만 있는 경우
-            dl_data['confidence'] = predictions_df['confidence']
-        else:
-            # 둘 다 없는 경우 0으로 설정
-            print("Warning: Neither 'prediction' nor 'confidence' column found in predictions_df. Using 0.")
-            dl_data['confidence'] = 0
+        # 테이블 구조에 맞게 필요한 컬럼만 선택
+        # deep_learning 테이블에 존재하는 컬럼: date, method, stock_name, confidence, estimated_profit_rate, risk_adjusted_return, notes
+        keep_columns = ['date', 'method', 'stock_name', 'confidence', 'estimated_profit_rate', 'risk_adjusted_return']
+        all_columns = list(dl_data.columns)
         
-        # 모델 이름 설정 (설정 파일에서 가져오거나 기본값 사용)
-        dl_data['method'] = settings.get('model_name', 'xgboost')
+        # 유지할 컬럼만 선택 (존재하는 컬럼만)
+        columns_to_keep = [col for col in keep_columns if col in all_columns]
+        dl_data = dl_data[columns_to_keep]
         
-        # 컬럼명 변경
-        dl_data = dl_data.rename(columns={
-            'pattern_date': 'date'
-        })
+        # notes 컬럼 추가 (선택사항)
+        dl_data['notes'] = f"Generated by {method_name} on {pd.Timestamp.now().strftime('%Y-%m-%d')}"
         
-        # 기존 데이터 중복 확인을 위한 코드명, 날짜, 메소드 조합 가져오기
-        existing_query = f"""
-            SELECT DISTINCT date, stock_name, method FROM deep_learning
-        """
-        existing_data = db_manager.execute_query(existing_query)
+        # 중요: 무한값(inf) 처리 - MySQL은 inf 값을 저장할 수 없음
+        for column in dl_data.select_dtypes(include=['float', 'float64']).columns:
+            dl_data[column] = dl_data[column].replace([float('inf'), float('-inf')], None)
         
-        if not existing_data.empty:
-            # date, stock_name, method를 튜플로 묶어 중복 확인용 세트 생성
-            existing_pairs = set()
-            for _, row in existing_data.iterrows():
-                # 날짜 형식 통일 (문자열 비교 시 오류 방지)
-                date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                existing_pairs.add((date, row['stock_name'], row['method']))
-                
-            # 저장할 데이터를 필터링하여 중복 제거
-            new_data = []
-            duplicate_count = 0
-            
-            for idx, row in dl_data.iterrows():
-                # 날짜 형식 통일
-                date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                pair = (date, row['stock_name'], row['method'])
-                
-                if pair not in existing_pairs:
-                    new_data.append(row)
-                else:
-                    duplicate_count += 1
-            
-            if duplicate_count > 0:
-                print(f"Skipping {duplicate_count} duplicate entries already in the database.")
-                
-            if not new_data:
-                print("All entries already exist in the database. Nothing to save.")
-                return True
-                
-            # 중복 제거된 데이터만 저장
-            dl_data = pd.DataFrame(new_data)
-            
-        # 저장할 데이터가 있는 경우에만 저장 진행
-        if not dl_data.empty:
-            result = db_manager.to_sql(dl_data, 'deep_learning')  # if_exists와 index 파라미터 제거
-            if result:
-                print(f"✅ {len(dl_data)}개 {dl_data['method'].iloc[0]} 예측 결과를 deep_learning 테이블에 저장했습니다.")
-                message = f"✅ {len(dl_data)}개 {dl_data['method'].iloc[0]} 예측 결과를 deep_learning 테이블에 저장했습니다."
-                send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], message)
-            return result
-        else:
-            print("No new data to save after duplicate filtering.")
-            return True
+        # 데이터 저장 (중복 확인 없이 바로 저장)
+        result = db_manager.to_sql(dl_data, 'deep_learning')
+        if result:
+            print(f"✅ {len(dl_data)}개의 예측 결과를 deep_learning 테이블에 저장했습니다.")
+        return result
     except Exception as e:
         print(f"❌ 예측 결과 저장 중 오류 발생: {e}")
         import traceback

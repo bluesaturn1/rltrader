@@ -278,7 +278,7 @@ def load_daily_craw_data_batch(db_manager, table, validation_dates, start_date_o
         print(f"Error loading batch data: {e}")
         return pd.DataFrame()
 
-def label_all_dates_future_returns(df, window_days=15):
+def label_all_dates_future_returns(df, window_days=10):
     """
     단일 종목의 모든 날짜에 대해 다음날 매수 후 window_days 동안의 risk_adjusted_return을 계산하여 라벨링합니다.
     
@@ -1250,7 +1250,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
 
     # Initialize settings dictionary here
     settings = {
-        'model_name': 'fire_lstm_all_labeled',
+        'model_name': 'fire_lstm_all_labeled_10',
         'buy_list_db': buy_list_db,
         'craw_db': craw_db,
         'telegram_token': cf.TELEGRAM_BOT_TOKEN,
