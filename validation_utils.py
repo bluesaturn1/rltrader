@@ -324,7 +324,7 @@ def save_performance_to_deeplearning(predictions_df, settings):
             dl_data[column] = dl_data[column].replace([float('inf'), float('-inf')], None)
         
         # 데이터 저장 (중복 확인 없이 바로 저장)
-        result = db_manager.to_sql(dl_data, 'deep_learning')
+        result = db_manager.to_sql_replace(dl_data, 'deep_learning')
         if result:
             print(f"✅ {len(dl_data)}개의 예측 결과를 deep_learning 테이블에 저장했습니다.")
         return result

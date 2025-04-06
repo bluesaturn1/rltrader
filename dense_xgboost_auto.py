@@ -16,7 +16,7 @@ from telegram_utils import send_telegram_message  # 텔레그램 유틸리티 �
 from datetime import datetime, timedelta
 from imblearn.over_sampling import SMOTE
 from db_connection import DBConnectionManager
-
+import validation_utils
 
 def execute_update_query(self, query):
     """
@@ -652,7 +652,6 @@ def save_performance_to_db(df, db_manager, table):
         print(f"Error saving performance results to MySQL: {e}")
         return False
 
-
 def setup_environment():
     """환경 설정 및 필요한 변수들을 초기화합니다."""
     print("Starting pattern recognition by xgboost...")
@@ -667,7 +666,6 @@ def setup_environment():
     performance_table = cf.RECOGNITION_PERFORMANCE_TABLE
     telegram_token = cf.TELEGRAM_BOT_TOKEN
     telegram_chat_id = cf.TELEGRAM_CHAT_ID
-    
     
     # 모델 디렉토리 설정
     model_dir = 'models'
@@ -690,7 +688,7 @@ def setup_environment():
         'Close_to_MA240', 'Volume_to_MA240',
     ]
     
-    # 설정 사전 생성
+    # 설정 사전 생성 - 한 번만 생성하고 모든 필요한 키 포함
     settings = {
         'host': host,
         'user': user,
@@ -705,10 +703,14 @@ def setup_environment():
         'COLUMNS_TRAINING_DATA': COLUMNS_TRAINING_DATA,
         'model_dir': model_dir,
         'current_date': datetime.now().strftime('%Y%m%d'),
-        'param_file': 'best_params.pkl'
+        'param_file': 'best_params.pkl',
+        'buy_list_db': buy_list_db,  # 추가: buy_list_db 객체
+        'craw_db': craw_db,  # 추가: craw_db 객체
+        'model_name': 'xgboost_weighted'  # 추가: 모델 이름
     }
     
     return buy_list_db, craw_db, settings
+
 
 # def load_or_train_model(buy_list_db, craw_db, filtered_results, settings):
 #     """사용자 입력에 따라 기존 모델을 로드하거나 새 모델을 훈련합니다."""
@@ -1190,8 +1192,8 @@ def main():
     # 모델 검증
     validation_results = validate_model(best_model, buy_list_db, craw_db, settings)
     
-    # 성능 평가
-    evaluate_model_performance(validation_results, buy_list_db, craw_db, settings, model_filename)
+    # 성능 평가 및 결과 처리 (settings에 이미 craw_db가 포함되어 있음)
+    validation_utils.process_and_report_validation_results(validation_results, settings)
 
 if __name__ == '__main__':
     main()
