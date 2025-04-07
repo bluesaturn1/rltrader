@@ -1283,7 +1283,6 @@ def analyze_top_performers_by_date(performance_df, top_n=3):
         import traceback
         traceback.print_exc()
         return [], pd.DataFrame()
-
 def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     validation_results = pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
     
@@ -1291,6 +1290,7 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
     
     print(f"마지막 날짜({validation_end_date}) 기준으로 예측을 수행하고 {validation_start_date}~{validation_end_date} 기간의 결과를 수집합니다.")
+    print(f"거래량 3만 이하 종목은 제외합니다.")
 
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), desc="종목 검증", total=len(stock_items)):
         stock_name = row.stock_name
@@ -1312,6 +1312,22 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
             if len(suspension_check_df) >= 5 and all(volume == 0 for volume in suspension_check_df.tail(5)['volume']):
                 print(f"⚠️ {stock_name} - 정지종목으로 감지됨 (최근 5일간 거래량 0)")
                 continue
+            
+            # 거래량 체크: 최근 20일 평균 거래량이 3만 이하면 제외
+            recent_data = all_df[(all_df['date'] >= validation_start_date) & 
+                               (all_df['date'] <= validation_end_date)].copy()
+            
+            if not recent_data.empty:
+                avg_volume = recent_data['volume'].mean()
+                if avg_volume <= 30000:
+                    print(f"⚠️ {stock_name} - 평균 거래량 ({int(avg_volume)})이 3만 이하입니다. 건너뜁니다.")
+                    continue
+                
+                # 하루라도 거래량이 3만 이하인 날이 있는지 확인
+                low_volume_days = recent_data[recent_data['volume'] <= 30000]
+                if not low_volume_days.empty:
+                    print(f"⚠️ {stock_name} - 거래량 3만 이하인 날이 {len(low_volume_days)}일 있습니다. 건너뜁니다.")
+                    continue
             
             # 마지막 날짜 기준으로 과거 500봉 데이터 추출
             df_window = all_df.tail(900).copy()  # 충분한 데이터 확보
@@ -1338,8 +1354,12 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
 
     print("\n검증 결과:")
     print(f"총 {len(validation_results)}개 예측 결과 발견")
+    
+    # NaN 값을 None으로 대체 (MySQL에서 NULL로 저장됨)
+    for column in validation_results.select_dtypes(include=['float', 'float64']).columns:
+        validation_results[column] = validation_results[column].replace([np.nan, float('inf'), float('-inf')], None)
+    
     return validation_results
-
 
 def filter_top_n_per_date(validation_results, top_n_per_date=3):
     filtered_results = []

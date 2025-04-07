@@ -3,11 +3,8 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 import pymysql
-
-import pandas as pd
-from sqlalchemy import create_engine
+import numpy as np  # NumPy 임포트 추가
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
  
 
 class DBConnectionManager:
@@ -142,14 +139,18 @@ class DBConnectionManager:
         # ALTER TABLE deep_learning
         # ADD UNIQUE INDEX unique_combination (date, method, stock_name);
 
-
     def to_sql_replace(self, df, table):
         """REPLACE INTO를 사용하여 중복 데이터를 대체합니다."""
+        
         if df.empty:
             print("Empty DataFrame, nothing to save.")
             return True
         
         try:
+            # NaN 값을 None으로 대체
+            for col in df.select_dtypes(include=['float', 'float64']).columns:
+                df[col] = df[col].replace([np.nan, float('inf'), float('-inf')], None)
+                
             records = df.to_dict('records')
             if not records:
                 return True
@@ -159,15 +160,15 @@ class DBConnectionManager:
             
             with self.engine.connect() as conn:
                 with conn.begin():  # 트랜잭션 시작
-                    # 전체 레코드 수
-                    total_records = len(records)
                     replaced_records = 0
                     
                     for record in records:
-                        # 파라미터 딕셔너리 준비
-                        params = {col: record[col] for col in columns}
+                        # None 값 확인
+                        for key, value in record.items():
+                            if pd.isna(value) or value in [float('inf'), float('-inf')]:
+                                record[key] = None
                         
-                        # REPLACE INTO 쿼리 실행 (중복 시 기존 데이터 삭제 후 새로운 데이터 삽입)
+                        params = {col: record[col] for col in columns}
                         query = f"""
                         REPLACE INTO {table} ({column_str})
                         VALUES ({', '.join(':' + col for col in columns)})
@@ -176,10 +177,10 @@ class DBConnectionManager:
                         result = conn.execute(text(query), params)
                         replaced_records += result.rowcount
                     
-                    print(f"Successfully replaced {replaced_records} records in {table}")
+                    print(f"REPLACE INTO: {replaced_records} records processed")
                 return True
         except Exception as e:
-            print(f"Error saving data to MySQL: {e}")
+            print(f"Error in to_sql_replace: {e}")
             self.reset_connection()
             return False
 
