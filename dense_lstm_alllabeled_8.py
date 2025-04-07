@@ -1306,13 +1306,7 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
                 
             # 날짜 형식을 datetime으로 변환
             all_df['date'] = pd.to_datetime(all_df['date'])
-            
-            # 정지 종목 확인
-            suspension_check_df = all_df.copy()
-            if len(suspension_check_df) >= 5 and all(volume == 0 for volume in suspension_check_df.tail(5)['volume']):
-                print(f"⚠️ {stock_name} - 정지종목으로 감지됨 (최근 5일간 거래량 0)")
-                continue
-            
+
             # 거래량 체크: 최근 20일 평균 거래량이 3만 이하면 제외
             recent_data = all_df[(all_df['date'] >= validation_start_date) & 
                                (all_df['date'] <= validation_end_date)].copy()
@@ -1323,11 +1317,6 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
                     print(f"⚠️ {stock_name} - 평균 거래량 ({int(avg_volume)})이 3만 이하입니다. 건너뜁니다.")
                     continue
                 
-                # 하루라도 거래량이 3만 이하인 날이 있는지 확인
-                low_volume_days = recent_data[recent_data['volume'] <= 30000]
-                if not low_volume_days.empty:
-                    print(f"⚠️ {stock_name} - 거래량 3만 이하인 날이 {len(low_volume_days)}일 있습니다. 건너뜁니다.")
-                    continue
             
             # 마지막 날짜 기준으로 과거 500봉 데이터 추출
             df_window = all_df.tail(900).copy()  # 충분한 데이터 확보
