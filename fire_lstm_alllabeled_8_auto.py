@@ -16,7 +16,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, InputLayer, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.regularizers import l2
+from tensorflow.keras.regularizers import l1, l2, l1_l2
+import tensorflow.keras.backend as K
 from sklearn.metrics import accuracy_score, mean_squared_error, mean_absolute_error
 from db_connection import DBConnectionManager
 import pickle
@@ -24,12 +25,14 @@ import tensorflow as tf
 from itertools import islice
 from sklearn.model_selection import TimeSeriesSplit
 import validation_utils
+
 # 파일 상단의 import 섹션에 추가
 
 
 # 2. 전역 변수 및 상수
 COLUMNS_CHART_DATA = ['date', 'open', 'high', 'low', 'close', 'volume']
 
+# 상수 정의 부분에서 COLUMNS_TRAINING_DATA 업데이트
 COLUMNS_TRAINING_DATA = [
     'Open_to_LastClose', 'High_to_Close', 'Low_to_Close',
     'Close_to_LastClose', 'Volume_to_LastVolume',
@@ -39,6 +42,16 @@ COLUMNS_TRAINING_DATA = [
     'Close_to_MA60', 'Volume_to_MA60',
     'Close_to_MA120', 'Volume_to_MA120',
     'Close_to_MA240', 'Volume_to_MA240',
+    # OBV 관련 특성 추가
+    'OBV_to_MA5', 'OBV_to_MA10', 'OBV_to_MA20',
+    'OBV_Change', 'OBV_Change_5', 'OBV_Change_10',
+    # 거래량 변동계수 추가
+    'Volume_CV_5', 'Volume_CV_10', 'Volume_CV_20',
+    # 거래량 증가율 변동성 추가
+    'Volume_Change', 'Volume_Change_Std_5', 'Volume_Change_Std_10', 'Volume_Change_Std_20',
+    # 이상 거래량 지표 추가
+    'Abnormal_Volume_5', 'Abnormal_Volume_10', 'Abnormal_Volume_20',
+    'Abnormal_Volume_Flag_5', 'Abnormal_Volume_Flag_10', 'Abnormal_Volume_Flag_20'
 ]
 
 # 모델 파일 경로 설정
@@ -265,7 +278,7 @@ def load_daily_craw_data_batch(db_manager, table, validation_dates, start_date_o
         print(f"Error loading batch data: {e}")
         return pd.DataFrame()
 
-def label_all_dates_future_returns(df, window_days=15):
+def label_all_dates_future_returns(df, window_days=8):
     """
     단일 종목의 모든 날짜에 대해 다음날 매수 후 window_days 동안의 risk_adjusted_return을 계산하여 라벨링합니다.
     
@@ -301,8 +314,8 @@ def label_all_dates_future_returns(df, window_days=15):
             if len(future_data) < 3:
                 continue
                 
-            # 매수 기준가 (다음날 시가)
-            buy_price = future_data.iloc[0]['open']
+            # 매수 기준가 (다음날 종가)
+            buy_price = future_data.iloc[0]['close']
             
             if buy_price <= 0:
                 continue
@@ -314,14 +327,19 @@ def label_all_dates_future_returns(df, window_days=15):
             max_profit = future_data['return'].max()
             max_loss = future_data['return'].min()
             
-            # Risk-adjusted return 계산
-            if max_loss >= 0:  # 손실이 없는 경우
+            # Risk-adjusted return calculation
+            if max_loss >= 0:  # No loss
                 risk_adjusted_return = max_profit
-            elif max_profit <= 0:  # 이익이 없는 경우
+            elif max_profit <= 0:  # No profit
                 risk_adjusted_return = max_loss
-            else:  # 이익과 손실이 모두 있는 경우
-                risk_adjusted_return = max_profit / abs(max_loss) if abs(max_loss) > 0 else max_profit
-                
+            else:  # Both profit and loss exist
+                if abs(max_loss) < 0.001:  # Very small loss close to 0
+                    risk_adjusted_return = 999.0  # Use large value instead of infinity
+                else:
+                    risk_adjusted_return = max_profit / abs(max_loss)
+                    
+            # Safety clipping to avoid extreme values
+            risk_adjusted_return = np.clip(risk_adjusted_return, -999.0, 999.0)
             # 이상치 제한 (-5에서 5 사이로 클리핑)
             risk_adjusted_return = np.clip(risk_adjusted_return, -5, 5)
             
@@ -346,133 +364,6 @@ def label_all_dates_future_returns(df, window_days=15):
         traceback.print_exc()
         return df
 
-def label_future_returns(filtered_results, craw_db, window_days=15):
-    """
-    각 종목의 모든 날짜에 대해 다음날 매수 시 이후 window_days 동안의 risk_adjusted_return으로 라벨링하고,
-    마지막 시그널 날짜 이전의 데이터 중 최신 500봉만 반환합니다.
-    """
-    labeled_data_dict = {}
-    
-    # 고유 종목 추출
-    unique_stocks = filtered_results['stock_name'].unique()
-    print(f"총 {len(unique_stocks)}개 종목에 대해 라벨링을 수행합니다.")
-    
-    for stock_name in tqdm(unique_stocks):
-        try:
-            # 이 종목에 대한 signal_date 확인
-            stock_signals = filtered_results[filtered_results['stock_name'] == stock_name]
-            
-            if stock_signals.empty:
-                continue
-                
-            # 마지막 signal_date 찾기
-            last_signal_date = pd.to_datetime(stock_signals['signal_date'].max())
-            
-            # window_days + 여유분 이후까지의 데이터가 필요
-            end_date = last_signal_date + pd.Timedelta(days=window_days + 30)
-            # 충분한 과거 데이터(특성 계산용)
-            start_date = last_signal_date - pd.Timedelta(days=1200)
-            
-            # 주가 데이터 로드
-            df = load_daily_craw_data(craw_db, stock_name, start_date, end_date)
-            
-            if df.empty:
-                print(f"{stock_name}: 데이터가 없습니다.")
-                continue
-                
-            # 특성 추출
-            df = extract_features(df)
-            
-            if df.empty:
-                print(f"{stock_name}: 특성 추출 후 데이터가 없습니다.")
-                continue
-                
-            # 날짜 형식을 datetime으로 변환
-            df['date'] = pd.to_datetime(df['date'])
-            
-            # 기본값 NaN으로 설정
-            df['Label'] = np.nan
-            
-            # 데이터를 날짜순으로 정렬
-            df = df.sort_values(by='date')
-            
-            # 각 날짜별로 이후 window_days 동안의 최대 수익률과 최대 손실률 계산
-            for i in range(len(df) - 1):
-                current_date = df.iloc[i]['date']
-                next_day_idx = i + 1
-                
-                # 다음날부터 window_days일 또는 데이터 끝까지의 데이터 추출
-                end_idx = min(next_day_idx + window_days, len(df))
-                future_data = df.iloc[next_day_idx:end_idx].copy()
-                
-                # 미래 데이터가 충분하지 않으면 건너뛰기
-                if len(future_data) < 3:
-                    continue
-                    
-                # 매수 기준가 (다음날 시가)
-                buy_price = future_data.iloc[0]['open']
-                
-                if buy_price <= 0:
-                    continue
-                    
-                # 일별 수익률 계산
-                future_data['return'] = (future_data['close'] - buy_price) / buy_price * 100
-                
-                # 최대 상승률과 최대 하락률 계산
-                max_profit = future_data['return'].max()
-                max_loss = future_data['return'].min()
-                
-                # Risk-adjusted return 계산
-                if max_loss >= 0:  # 손실이 없는 경우
-                    risk_adjusted_return = max_profit
-                elif max_profit <= 0:  # 이익이 없는 경우
-                    risk_adjusted_return = max_loss
-                else:  # 이익과 손실이 모두 있는 경우
-                    risk_adjusted_return = max_profit / abs(max_loss) if abs(max_loss) > 0 else max_profit
-                
-
-                # Risk-adjusted return 계산 후 추가
-                # 이상치 제한 (-5에서 5 사이로 클리핑)
-                risk_adjusted_return = np.clip(risk_adjusted_return, -5, 5)
-                
-                # 또는 로그 변환 사용
-                # 양수값과 음수값을 모두 처리하기 위한 부호 보존 로그 변환
-                # 수식: sign(x) * log(1 + abs(x))
-                if risk_adjusted_return > 0:
-                    risk_adjusted_return = np.log1p(risk_adjusted_return)
-                elif risk_adjusted_return < 0:
-                    risk_adjusted_return = -np.log1p(abs(risk_adjusted_return))
-                
-
-                # 현재 날짜에 라벨 부여
-                df.iloc[i, df.columns.get_loc('Label')] = risk_adjusted_return
-            
-            # NaN 값을 가진 행 제거
-            df = df.dropna(subset=['Label'])
-            
-            if df.empty:
-                print(f"{stock_name}: 라벨링 후 데이터가 없습니다.")
-                continue
-            
-            # 중요: 마지막 signal_date 이전의 데이터만 선택하고, 최신 500봉만 선택
-            df_filtered = df[df['date'] <= last_signal_date].copy()
-            
-            if len(df_filtered) > 500:
-                # 마지막 500봉만 사용
-                df_filtered = df_filtered.iloc[-500:].copy()
-            
-            print(f"{stock_name}: 마지막 시그널 {last_signal_date.strftime('%Y-%m-%d')} 이전 {len(df_filtered)}개 데이터 라벨링 완료")
-            
-            # 결과 저장
-            labeled_data_dict[stock_name] = df_filtered
-            
-        except Exception as e:
-            print(f"{stock_name} 라벨링 중 오류 발생: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    return labeled_data_dict
-
 
 # 모델 아키텍처를 더 단순화하기
 def create_lstm_model(input_shape):
@@ -481,11 +372,11 @@ def create_lstm_model(input_shape):
     # 더 작은 네트워크, 더 강한 정규화
     model.add(LSTM(2, kernel_regularizer=l2(0.05)))  # 유닛 수를 2개로 더 감소
     model.add(BatchNormalization())  # 배치 정규화 추가
-    model.add(Dropout(0.9))  # 드롭아웃 비율 증가
+    model.add(Dropout(0.7))  # 드롭아웃 비율 증가
     model.add(Dense(1))
     
     # 학습률 조정
-    optimizer = Adam(learning_rate=0.000001)  # 학습률 더 감소
+    optimizer = Adam(learning_rate=0.000005)  # 현재 0.00001에서 더 감소
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     return model
 
@@ -501,29 +392,70 @@ def create_lightweight_lstm_model(input_shape):
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     return model
 
-
 def create_improved_lstm_model(input_shape):
-    """개선된 LSTM 모델 생성"""
     model = Sequential()
     model.add(InputLayer(shape=input_shape))
     
-    # 모델 구조 변경: 더 작은 레이어와 강화된 정규화
-    model.add(LSTM(8, return_sequences=True, kernel_regularizer=l2(0.03)))
+    # 첫 번째 LSTM 레이어 - 더 넓게
+    model.add(LSTM(16, return_sequences=True, 
+                  kernel_regularizer=l2(0.003),
+                  recurrent_regularizer=l2(0.002),
+                  activation='tanh'))
     model.add(BatchNormalization())
-    model.add(Dropout(0.5))
+    model.add(Dropout(0.3))  # 드롭아웃 감소
     
-    model.add(LSTM(4, kernel_regularizer=l2(0.03)))
+    # 두 번째 LSTM 레이어
+    model.add(LSTM(8, 
+                  kernel_regularizer=l2(0.003),
+                  return_sequences=False))
     model.add(BatchNormalization())
-    model.add(Dropout(0.5))
+    model.add(Dropout(0.4))  # 0.6에서 0.4로 감소
     
-    model.add(Dense(1, kernel_regularizer=l2(0.03)))
+    model.add(Dense(1))
     
-    # 학습률 감소
-    optimizer = Adam(learning_rate=0.00001)  # 더 낮은 학습률
-    
-    # Huber Loss 사용 (MSE보다 이상치에 강함)
-    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber(delta=1.0), metrics=['mae'])
+    # 학습률 증가
+    optimizer = Adam(learning_rate=0.0001, clipnorm=1.0)  # 5배 증가
+    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber(delta=2.0), metrics=['mae'])
     return model
+
+
+def augment_time_series_data(X, y, augmentation_factor=1.5):
+    """시계열 데이터를 위한 증강 기법 적용"""
+    X_augmented = X.copy()
+    y_augmented = y.copy()
+    
+    # 원본 데이터의 크기
+    original_size = len(X)
+    
+    # 1. 가우시안 노이즈 추가
+    for i in range(int(original_size * 0.3)):  # 30%의 데이터 증강
+        noise_level = np.random.uniform(0.0002, 0.005)  # 노이즈 수준 랜덤 설정
+        sample_idx = np.random.randint(0, original_size)
+        
+        # 원본 데이터 복사
+        new_sample = X.iloc[sample_idx].copy()
+        # 노이즈 추가
+        noise = np.random.normal(0, noise_level, size=new_sample.shape)
+        new_sample = new_sample + noise
+        
+        # 증강 데이터 추가
+        X_augmented = pd.concat([X_augmented, pd.DataFrame([new_sample], columns=X.columns)])
+        y_augmented = pd.concat([y_augmented, pd.Series([y.iloc[sample_idx]])], ignore_index=True)
+    
+    # 2. 스케일링 변환
+    for i in range(int(original_size * 0.2)):  # 20%의 데이터 증강
+        scale_factor = np.random.uniform(0.97, 1.03)  # 5% 이내 스케일링
+        sample_idx = np.random.randint(0, original_size)
+        
+        # 원본 데이터 복사 및 스케일링
+        new_sample = X.iloc[sample_idx].copy() * scale_factor
+        
+        # 증강 데이터 추가
+        X_augmented = pd.concat([X_augmented, pd.DataFrame([new_sample], columns=X.columns)])
+        y_augmented = pd.concat([y_augmented, pd.Series([y.iloc[sample_idx]])], ignore_index=True)
+    
+    return X_augmented, y_augmented
+
 
 def create_advanced_lstm_model(input_shape):
     model = Sequential()
@@ -587,8 +519,8 @@ def train_lstm_model(X, y):
         # 조기 종료 콜백 설정
         early_stopping = EarlyStopping(
             monitor='val_loss',
-            patience=10,
-            min_delta=0.0005,
+            patience=3,
+            min_delta=0.0001,
             restore_best_weights=True,
             verbose=1
         )
@@ -633,6 +565,10 @@ def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir,
         for train_idx, val_idx in tscv.split(X):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            # 데이터 증강 적용 (훈련 데이터만)
+            X_train_augmented, y_train_augmented = augment_time_series_data(X_train, y_train)
+            print(f"원본 훈련 데이터: {len(X_train)}개, 증강 후: {len(X_train_augmented)}개")
+            
             
             # 데이터 형태 변환 (LSTM 입력 형태에 맞게)
             X_train = np.expand_dims(X_train.values, axis=2)
@@ -644,16 +580,16 @@ def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir,
             # 콜백 설정
             early_stopping = EarlyStopping(
                 monitor='val_loss',
-                patience=5,
-                min_delta=0.0005,
+                patience=10,
+                min_delta=0.0001,
                 restore_best_weights=True,
                 verbose=1
             )
             reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
                 monitor='val_loss',
-                factor=0.2,
-                patience=7,
-                min_lr=0.000005,
+                factor=0.3,
+                patience=8,
+                min_lr=0.00001,
                 verbose=1
             )
             
@@ -677,7 +613,7 @@ def train_improved_lstm_model(filtered_results, buy_list_db, craw_db, model_dir,
             history = model.fit(
                 X_train, y_train, 
                 epochs=100,
-                batch_size=32,
+                batch_size=64,
                 validation_data=(X_val, y_val),
                 class_weight=class_weights,
                 callbacks=[early_stopping, reduce_lr],
@@ -709,44 +645,57 @@ def train_continued_lstm_model(filtered_results, previous_model, stock_name, cur
         # 데이터 형태 변환
         X_reshaped = np.expand_dims(X.values, axis=2)
         
-        # 기존 모델로 계속 훈련
+        # 개선: 더 낮은 학습률 적용
+        current_lr = 0.000005  # 기존의 절반 수준
+        
+        # K.set_value 대신 안전한 방법으로 학습률 설정
+        try:
+            # assign 메소드를 가진 경우 (TensorFlow 변수인 경우)
+            if hasattr(previous_model.optimizer.learning_rate, 'assign'):
+                previous_model.optimizer.learning_rate.assign(current_lr)
+            else:
+                # 그렇지 않으면 모델을 재컴파일
+                previous_model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=current_lr),
+                    loss=previous_model.loss,
+                    metrics=previous_model.metrics
+                )
+            print(f"Learning rate set to {current_lr}")
+        except Exception as e:
+            print(f"Error setting learning rate: {e}. Recompiling optimizer.")
+            # 오류 발생 시 새 optimizer로 컴파일
+            previous_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=current_lr),
+                loss=previous_model.loss,
+                metrics=previous_model.metrics
+            )
+        
+        # 개선: 더 긴 patience 값 설정
         early_stopping = EarlyStopping(
             monitor='val_loss',
-            patience=5,
-            min_delta=0.001,
+            patience=10,  # 5에서 10으로 증가
+            min_delta=0.0001,  # 0.001에서 0.0001로 감소
             restore_best_weights=True,
             verbose=1
         )
-        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=0.00001,
-            verbose=1
-        )
         
-        # 클래스 가중치 계산
-        pos_samples = sum(y)
-        if pos_samples > 0 and pos_samples < len(y):
-            class_weights = {
-                0: len(y) / (2 * (len(y) - pos_samples)), 
-                1: len(y) / (2 * pos_samples)
-            }
-        else:
-            idx_info = f" ({current_idx+1}/{total_codes})" if current_idx is not None else ""
-            print(f"Warning: Only one class present in training data for {stock_name}{idx_info}. Using default weights.")
-            class_weights = {0: 1.0, 1: 1.0}
+        # 나머지 코드는 그대로 유지...
+        batch_size = 16
+        validation_split = 0.25
         
         # 기존 모델에 추가 훈련
         history = previous_model.fit(
             X_reshaped, y, 
-            epochs=50,  # 적은 에포크로 추가 훈련
-            batch_size=32,
-            validation_split=0.2,
-            class_weight=class_weights,
-            callbacks=[early_stopping, reduce_lr],
+            epochs=50,
+            batch_size=batch_size,
+            validation_split=validation_split,
+            callbacks=[early_stopping],
             verbose=1
         )
+        
+        # 훈련 결과 평가
+        val_loss = min(history.history['val_loss'])
+        print(f"Continued training result - Best val_loss: {val_loss:.4f}")
         
         # 추가 훈련된 모델 반환
         return previous_model
@@ -857,8 +806,8 @@ def predict_pattern(model, df, stock_name, use_data_dates=True):
                 validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
             else:
                 # cf.py에 설정된 검증 기간 사용 (외부 검증용)
-                validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
-                validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
+                validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE_AUTO)
+                validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE_AUTO)
             
             print(f"Validation period: {validation_start_date} to {validation_end_date}")
             
@@ -884,7 +833,7 @@ def predict_pattern(model, df, stock_name, use_data_dates=True):
         except Exception as e:
             print(f"Error in date processing: {e}")
             print(f"Debug info - df['date'] sample: {df['date'].head()}")
-            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE}")
+            print(f"Debug info - validation dates: {cf.VALIDATION_END_DATE_AUTO}")
             return pd.DataFrame(columns=['date', 'stock_name'])
             
     except Exception as e:
@@ -1028,8 +977,8 @@ def predict_pattern_optimized(model, df, stock_name, use_data_dates=True):
             validation_start_date = max_date + pd.Timedelta(days=1)
             validation_end_date = validation_start_date + pd.Timedelta(days=cf.PREDICTION_VALIDATION_DAYS)
         else:
-            validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
-            validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
+            validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE_AUTO)
+            validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE_AUTO)
         print(f"Validation period: {validation_start_date} to {validation_end_date}")
         recent_patterns = df_result[
             (df_result['Prediction'] > 0) & 
@@ -1052,53 +1001,6 @@ def predict_pattern_optimized(model, df, stock_name, use_data_dates=True):
         traceback.print_exc()
         return pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
 
-
-def evaluate_performance_improved(df, start_date, end_date):
-    """최대 수익률과 최대 손실을 모두 계산하는 개선된 성능 평가 함수"""
-    try:
-        print('Evaluating performance with risk metrics')
-        df['date'] = pd.to_datetime(df['date'])
-        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-        
-        if df.empty:
-            print(f"No data found between {start_date} and {end_date}")
-            return None, None, None
-            
-        # 초기 종가 (매수 가격)
-        initial_close = df['close'].iloc[0]
-        
-        # 일별 수익률 계산
-        df['daily_return'] = df['close'] / initial_close - 1
-        
-        # 최대 상승률 계산
-        max_return = df['daily_return'].max() * 100
-        max_return_day = df.loc[df['daily_return'].idxmax(), 'date']
-        
-        # 최대 하락률 계산
-        max_loss = df['daily_return'].min() * 100
-        max_loss_day = df.loc[df['daily_return'].idxmin(), 'date']
-        
-        # 위험 조정 수익률 (최대 상승률 - 최대 하락률의 절대값)
-        risk_adjusted_return = max_return - abs(max_loss)
-        # risk_adjusted_return 계산 후 추가
-        # 이상치 제한 (예: -10에서 10 사이로)
-        # risk_adjusted_return = np.clip(risk_adjusted_return, -10, 10)
-        
-        result = {
-            'max_return': max_return,
-            'max_return_day': max_return_day,
-            'max_loss': max_loss,
-            'max_loss_day': max_loss_day,
-            'risk_adjusted_return': risk_adjusted_return
-        }
-        
-        return result
-        
-    except Exception as e:
-        print(f'Error evaluating performance: {e}')
-        import traceback
-        traceback.print_exc()
-        return None
 
 # 성능 결과 저장 함수도 수정
 def save_lstm_predictions_to_db(db_manager, predictions_df, model_name=None):
@@ -1288,9 +1190,10 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
     validation_results = pd.DataFrame(columns=['date', 'stock_name', 'Prediction'])
     
     validation_end_date = validation_chunks[0]  # 마지막 날짜
-    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE_AUTO)
     
     print(f"마지막 날짜({validation_end_date}) 기준으로 예측을 수행하고 {validation_start_date}~{validation_end_date} 기간의 결과를 수집합니다.")
+    print(f"거래량 3만 이하 종목은 제외합니다.")
 
     for idx, row in tqdm(enumerate(stock_items.itertuples(index=True)), desc="종목 검증", total=len(stock_items)):
         stock_name = row.stock_name
@@ -1316,12 +1219,6 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
                 if avg_volume <= 30000:
                     print(f"⚠️ {stock_name} - 평균 거래량 ({int(avg_volume)})이 3만 이하입니다. 건너뜁니다.")
                     continue
-            # 최근 5일 중에 거래량 0인 날이 있으면 건너뛰기
-            last_days = 5
-            recent_days = recent_data.iloc[-last_days:]
-            if (recent_days['volume'] == 0).any():
-                print(f"⚠️ {stock_name} - 최근 {last_days}일 내 거래량 0으로 감지됨. 건너뜁니다.")
-                continue   
             
             # 마지막 날짜 기준으로 과거 500봉 데이터 추출
             df_window = all_df.tail(900).copy()  # 충분한 데이터 확보
@@ -1348,37 +1245,21 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
 
     print("\n검증 결과:")
     print(f"총 {len(validation_results)}개 예측 결과 발견")
-    return validation_results
-
-
-def filter_top_n_per_date(validation_results, top_n_per_date=3):
-    filtered_results = []
     
-    if not validation_results.empty and 'date' in validation_results.columns:
-        # 먼저 중복 항목 제거 (종목명과 날짜 기준)
-        validation_results = validation_results.drop_duplicates(subset=['stock_name', 'date'])
-        
-        # 그 후 날짜별 상위 N개 종목 선택
-        date_groups = validation_results.groupby(validation_results['date'].dt.date)
-        for date, group in date_groups:
-            sorted_group = group.sort_values(by='Prediction', ascending=False)
-            top_n_stocks = sorted_group.head(top_n_per_date)
-            filtered_results.append(top_n_stocks)
-            
-        if filtered_results:
-            validation_results = pd.concat(filtered_results)
+    # NaN 값을 None으로 대체 (MySQL에서 NULL로 저장됨)
+    for column in validation_results.select_dtypes(include=['float', 'float64']).columns:
+        validation_results[column] = validation_results[column].replace([np.nan, float('inf'), float('-inf')], None)
     
     return validation_results
-
 
 def run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name='lstm'):
-    print(f"\n마지막 날짜 기준 검증 수행: {cf.VALIDATION_START_DATE} ~ {cf.VALIDATION_END_DATE}")
-    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE)
-    validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE)
+    print(f"\n마지막 날짜 기준 검증 수행: {cf.VALIDATION_START_DATE_AUTO} ~ {cf.VALIDATION_END_DATE_AUTO}")
+    validation_start_date = pd.to_datetime(cf.VALIDATION_START_DATE_AUTO)
+    validation_end_date = pd.to_datetime(cf.VALIDATION_END_DATE_AUTO)
 
     # Initialize settings dictionary here
     settings = {
-        'model_name': 'dense_lstm_all_labeled',
+        'model_name': 'fire_lstm_all_labeled_8',
         'buy_list_db': buy_list_db,
         'craw_db': craw_db,
         'telegram_token': cf.TELEGRAM_BOT_TOKEN,
@@ -1402,18 +1283,19 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
         all_predictions = all_predictions[(all_predictions['date'] >= validation_start_date) & 
                                           (all_predictions['date'] <= validation_end_date)]
         
-        # 3. 날짜별로 그룹화하고 각 날짜별 상위 5개 종목만 선택
+        # 3. 날짜별로 그룹화하고 각 날짜별 상위 3개 종목만 선택
         validation_results = pd.DataFrame()
         date_groups = all_predictions.groupby(all_predictions['date'].dt.date)
         
         for date, group in date_groups:
-            # 각 날짜별로 Prediction 기준 상위 5개 종목 선택
+            # 각 날짜별로 Prediction 기준 상위 3개 종목 선택
             top_stocks = group.nlargest(3, 'Prediction')
             validation_results = pd.concat([validation_results, top_stocks], ignore_index=True)
         
-        print(f"날짜별 상위 5개 종목 필터링 후 총 결과: {len(validation_results)}개")
+        print(f"날짜별 상위 3개 종목 필터링 후 총 결과: {len(validation_results)}개")
         
         validation_utils.process_and_report_validation_results(validation_results,settings)
+        
     else:
         print("예측 결과가 없습니다.")
 
@@ -1427,31 +1309,39 @@ def get_user_choice():
             print("Invalid choice. Please enter 'yes', 'new', 'continue', 'validate', 'summary', or 'no'.")
 
 def load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, current_date):
+    """지정된 모델 파일을 직접 로드하고 검증합니다."""
     try:
-        model_files = [f for f in os.listdir(model_dir) if f.endswith('.keras')]
-        if model_files:
-            print("Available model files:")
-            for i, file in enumerate(model_files):
-                print(f"{i + 1}. {file}")
-                
-            model_choice = int(input("Select a model to validate (number): ")) - 1
-            if 0 <= model_choice < len(model_files):
-                model_file = os.path.join(model_dir, model_files[model_choice])
-                best_model = tf.keras.models.load_model(model_file)
-                print(f"Loaded model from {model_file}")
-                
-                # 모델 이름 추출 - 파일 이름에서 .keras 제거
-                model_name = os.path.basename(model_file).replace('.keras', '')
-                print(f"Using model name: {model_name}")
-                
-                run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name)
-            else:
-                print("Invalid choice. Exiting.")
+        # 지정된 모델 파일명
+        specified_model = "fire_lstm_all_labeled_8.keras"
+        model_path = os.path.join(model_dir, specified_model)
+        
+        if os.path.exists(model_path):
+            print(f"지정된 모델 파일을 사용합니다: {specified_model}")
+            best_model = tf.keras.models.load_model(model_path)
+            print(f"모델을 성공적으로 로드했습니다: {model_path}")
+            
+            # 모델 이름 추출 - 파일 이름에서 .keras 제거
+            model_name = os.path.basename(model_path).replace('.keras', '')
+            print(f"모델 이름: {model_name}")
+            
+            # 검증 실행
+            run_validation(best_model, buy_list_db, craw_db, results_table, current_date, model_name)
         else:
-            print("No model files found in the directory.")
+            print(f"지정된 모델 파일을 찾을 수 없습니다: {model_path}")
+            
+            # 대안으로 디렉토리에 있는 모델 목록 출력
+            model_files = [f for f in os.listdir(model_dir) if f.endswith('.keras')]
+            if model_files:
+                print("사용 가능한 모델 파일:")
+                for i, file in enumerate(model_files):
+                    print(f"{i + 1}. {file}")
+                print("위 목록에서 원하는 모델 파일명으로 specified_model 값을 수정하세요.")
+            else:
+                print(f"{model_dir} 디렉토리에 모델 파일이 없습니다.")
     except Exception as e:
-        print(f"Error loading model: {e}")
-
+        print(f"모델 로딩 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
 
 def process_model_workflow(filtered_results, buy_list_db, craw_db, model_dir, results_table, current_date, telegram_token, telegram_chat_id):
     """사용자 선택에 따라 모델 훈련, 계속 훈련, 검증 또는 모델 요약을 수행합니다."""
@@ -1461,8 +1351,8 @@ def process_model_workflow(filtered_results, buy_list_db, craw_db, model_dir, re
         print("Filtered results are empty. Exiting.")
         return
     
-    choice = get_user_choice()
-    
+    # choice = get_user_choice()
+    choice = 'validate'  # For testing purposes, set to 'validate'
     if choice == 'yes' or choice == 'new':
         # 종목 선택 기능 추가
         select_option = input("모든 종목을 훈련하시겠습니까? (y/n): ").lower()
@@ -1562,6 +1452,49 @@ def inspect_table_structure(db_manager, table):
         print(f"Error inspecting table structure: {e}")
         return None, None
 
+def load_data_for_lstm(db_manager, start_date, end_date):
+    """일별 주가 데이터를 로드하여 LSTM 모델 훈련을 위한 데이터셋 생성"""
+    try:
+        # 주식 종목 리스트 가져오기
+        stock_items = get_stock_items(host, user, password, database_buy_list)
+        print(f"총 {len(stock_items)} 종목 중 데이터 로드 시작")
+        
+        all_data = []
+        
+        # 각 종목별 데이터 로드 및 가공
+        for i, row in tqdm(enumerate(stock_items.itertuples()), total=len(stock_items), desc="데이터 로드"):
+            stock_name = row.stock_name
+            
+            # 일별 데이터 로드
+            df = load_daily_craw_data(db_manager, stock_name, start_date, end_date)
+            
+            if not df.empty and len(df) >= 250:
+                # 특성 추출
+                df_features = extract_features(df)
+                
+                if not df_features.empty:
+                    # 필요한 경우 라벨 추가
+                    df_features['stock_name'] = stock_name
+                    all_data.append(df_features)
+            
+            # 메모리 관리를 위한 정리
+            if i % 100 == 0:
+                clear_memory()
+        
+        if all_data:
+            combined_data = pd.concat(all_data)
+            print(f"총 {len(combined_data)} 행의 데이터 로드 완료")
+            return combined_data
+        else:
+            print("로드된 데이터가 없습니다.")
+            return pd.DataFrame()
+            
+    except Exception as e:
+        print(f"데이터 로드 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+
 def load_stock_data_for_signals(db_manager, stock_signals, table):
     try:
         # 신호 날짜와 예상 수익률 추출
@@ -1595,7 +1528,7 @@ def load_stock_data_for_signals(db_manager, stock_signals, table):
             return pd.DataFrame()
         
         # 모든 날짜에 대해 라벨링 - 기존 label_data 대신 새로운 함수 사용
-        df_labeled = label_all_dates_future_returns(df_features, window_days=15)
+        df_labeled = label_all_dates_future_returns(df_features, window_days=8)
         
         # 마지막 시그널 날짜까지의 데이터만 사용 (미래 데이터 제외)
         df_labeled = df_labeled[df_labeled['date'] <= latest_signal_date]
@@ -1718,44 +1651,9 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
                 
                 # 데이터를 날짜순으로 정렬
                 df = df.sort_values(by='date')
-                
-                # 각 날짜별로 이후 15일 동안의 최대 수익률과 최대 손실률 계산
-                for i in range(len(df) - 1):
-                    current_date_val = df.iloc[i]['date']
-                    next_day_idx = i + 1
-                    
-                    # 다음날부터 window_days일 또는 데이터 끝까지의 데이터 추출
-                    end_idx = min(next_day_idx + 15, len(df))
-                    future_data = df.iloc[next_day_idx:end_idx].copy()
-                    
-                    # 미래 데이터가 충분하지 않으면 건너뛰기
-                    if len(future_data) < 3:
-                        continue
-                        
-                    # 매수 기준가 (다음날 시가)
-                    buy_price = future_data.iloc[0]['open']
-                    
-                    if buy_price <= 0:
-                        continue
-                        
-                    # 일별 수익률 계산
-                    future_data['return'] = (future_data['close'] - buy_price) / buy_price * 100
-                    
-                    # 최대 상승률과 최대 하락률 계산
-                    max_profit = future_data['return'].max()
-                    max_loss = future_data['return'].min()
-                    
-                    # Risk-adjusted return 계산
-                    if max_loss >= 0:  # 손실이 없는 경우
-                        risk_adjusted_return = max_profit
-                    elif max_profit <= 0:  # 이익이 없는 경우
-                        risk_adjusted_return = max_loss
-                    else:  # 이익과 손실이 모두 있는 경우
-                        risk_adjusted_return = max_profit / abs(max_loss) if abs(max_loss) > 0 else max_profit
-                    
-                    # 현재 날짜에 라벨 부여
-                    df.iloc[i, df.columns.get_loc('Label')] = risk_adjusted_return
-                
+
+                df = label_all_dates_future_returns(df, window_days=8)
+                                
                 # NaN 값을 가진 행 제거
                 df = df.dropna(subset=['Label'])
                 
@@ -1939,45 +1837,74 @@ def extract_features(df):
         df['MA120'] = df['close'].rolling(window=120).mean()
         df['MA240'] = df['close'].rolling(window=240).mean()
 
-        # 0으로 나누기 방지 처리 강화
-        epsilon = 1e-10  # 매우 작은 값으로 0 대체
-        df['MA5'] = df['MA5'].replace(0, epsilon)
-        df['MA10'] = df['MA10'].replace(0, epsilon)
-        df['MA20'] = df['MA20'].replace(0, epsilon)
-        df['MA60'] = df['MA60'].replace(0, epsilon)
-        df['MA120'] = df['MA120'].replace(0, epsilon)
-        df['MA240'] = df['MA240'].replace(0, epsilon)
+        # OBV(On-Balance Volume) 계산
+        df['OBV'] = 0  # OBV 초기값
+        for i in range(1, len(df)):
+            if df['close'].iloc[i] > df['close'].iloc[i-1]:  # 종가가 상승했을 때
+                df.loc[df.index[i], 'OBV'] = df.loc[df.index[i-1], 'OBV'] + df.loc[df.index[i], 'volume']
+            elif df['close'].iloc[i] < df['close'].iloc[i-1]:  # 종가가 하락했을 때
+                df.loc[df.index[i], 'OBV'] = df.loc[df.index[i-1], 'OBV'] - df.loc[df.index[i], 'volume']
+            else:  # 종가가 동일할 때
+                df.loc[df.index[i], 'OBV'] = df.loc[df.index[i-1], 'OBV']
 
-        # 각 특성 계산 후 남은 데이터 디버깅
+        # OBV 이동평균 계산
+        df['OBV_MA5'] = df['OBV'].rolling(window=5).mean()
+        df['OBV_MA10'] = df['OBV'].rolling(window=10).mean()
+        df['OBV_MA20'] = df['OBV'].rolling(window=20).mean()
+
+        # 가격 관련 특성
+        df['Open_to_LastClose'] = df['open'] / df['close'].shift(1)
+        df['Close_to_LastClose'] = df['close'] / df['close'].shift(1)
+        df['High_to_Close'] = df['high'] / df['close']
+        df['Low_to_Close'] = df['low'] / df['close']
+        
+        # 거래량 특성
+        df['Volume_to_LastVolume'] = df['volume'] / df['volume'].shift(1)
+        
+        # 이동평균 대비 가격 비율
         df['Close_to_MA5'] = df['close'] / df['MA5']
         df['Close_to_MA10'] = df['close'] / df['MA10']
         df['Close_to_MA20'] = df['close'] / df['MA20']
         df['Close_to_MA60'] = df['close'] / df['MA60']
         df['Close_to_MA120'] = df['close'] / df['MA120']
         df['Close_to_MA240'] = df['close'] / df['MA240']
+        
+        # 이동평균 대비 거래량 비율
+        df['Volume_to_MA5'] = df['volume'] / df['volume'].rolling(window=5).mean()
+        df['Volume_to_MA10'] = df['volume'] / df['volume'].rolling(window=10).mean()
+        df['Volume_to_MA20'] = df['volume'] / df['volume'].rolling(window=20).mean()
+        df['Volume_to_MA60'] = df['volume'] / df['volume'].rolling(window=60).mean()
+        df['Volume_to_MA120'] = df['volume'] / df['volume'].rolling(window=120).mean()
+        df['Volume_to_MA240'] = df['volume'] / df['volume'].rolling(window=240).mean()
+        
+        # OBV 비율 특성
+        df['OBV_to_MA5'] = df['OBV'] / df['OBV_MA5']
+        df['OBV_to_MA10'] = df['OBV'] / df['OBV_MA10']
+        df['OBV_to_MA20'] = df['OBV'] / df['OBV_MA20']
 
-        df['Volume_MA5'] = df['volume'].rolling(window=5).mean().replace(0, epsilon)
-        df['Volume_MA10'] = df['volume'].rolling(window=10).mean().replace(0, epsilon)
-        df['Volume_MA20'] = df['volume'].rolling(window=20).mean().replace(0, epsilon)
-        df['Volume_MA60'] = df['volume'].rolling(window=60).mean().replace(0, epsilon)
-        df['Volume_MA120'] = df['volume'].rolling(window=120).mean().replace(0, epsilon)
-        df['Volume_MA240'] = df['volume'].rolling(window=240).mean().replace(0, epsilon)
+        # OBV 변화량 계산
+        df['OBV_Change'] = df['OBV'].pct_change()
+        df['OBV_Change_5'] = df['OBV'].pct_change(periods=5)
+        df['OBV_Change_10'] = df['OBV'].pct_change(periods=10)
 
-        df['Volume_to_MA5'] = df['volume'] / df['Volume_MA5']
-        df['Volume_to_MA10'] = df['volume'] / df['Volume_MA10']
-        df['Volume_to_MA20'] = df['volume'] / df['Volume_MA20']
-        df['Volume_to_MA60'] = df['volume'] / df['Volume_MA60']
-        df['Volume_to_MA120'] = df['volume'] / df['Volume_MA120']
-        df['Volume_to_MA240'] = df['volume'] / df['Volume_MA240']
-
-        df['close_shifted'] = df['close'].shift(1).replace(0, epsilon)
-        df['Open_to_LastClose'] = df['open'] / df['close_shifted']
-        df['Close_to_LastClose'] = df['close'] / df['close_shifted']
-        df['High_to_Close'] = df['high'] / df['close'].replace(0, epsilon)
-        df['Low_to_Close'] = df['low'] / df['close'].replace(0, epsilon)
-
-        df['volume_shifted'] = df['volume'].shift(1).replace(0, epsilon)
-        df['Volume_to_LastVolume'] = df['volume'] / df['volume_shifted']
+        # 2. 거래량 변동계수(CV) 추가
+        df['Volume_CV_5'] = df['volume'].rolling(window=5).std() / df['volume'].rolling(window=5).mean()
+        df['Volume_CV_10'] = df['volume'].rolling(window=10).std() / df['volume'].rolling(window=10).mean()
+        df['Volume_CV_20'] = df['volume'].rolling(window=20).std() / df['volume'].rolling(window=20).mean()
+        
+        # 3. 거래량 증가율 변동성 추가
+        df['Volume_Change'] = df['volume'].pct_change()
+        df['Volume_Change_Std_5'] = df['Volume_Change'].rolling(window=5).std()
+        df['Volume_Change_Std_10'] = df['Volume_Change'].rolling(window=10).std()
+        df['Volume_Change_Std_20'] = df['Volume_Change'].rolling(window=20).std()
+        
+        # 4. 이상 거래량 지표 추가
+        df['Abnormal_Volume_5'] = df['volume'] / df['volume'].rolling(window=5).mean()
+        df['Abnormal_Volume_10'] = df['volume'] / df['volume'].rolling(window=10).mean()
+        df['Abnormal_Volume_20'] = df['volume'] / df['volume'].rolling(window=20).mean()
+        df['Abnormal_Volume_Flag_5'] = (df['Abnormal_Volume_5'] > 2).astype(int)
+        df['Abnormal_Volume_Flag_10'] = (df['Abnormal_Volume_10'] > 2).astype(int)
+        df['Abnormal_Volume_Flag_20'] = (df['Abnormal_Volume_20'] > 2).astype(int)
 
         # 무한값과 너무 큰 값 제거
         df = df.replace([np.inf, -np.inf], np.nan)
@@ -2003,6 +1930,8 @@ def extract_features(df):
         import traceback
         traceback.print_exc()
         return pd.DataFrame()
+
+
 
 # 메인 코드에서 filtered_results 데이터프레임에 필요한 열들이 포함되어 있는지 확인
 if __name__ == '__main__':

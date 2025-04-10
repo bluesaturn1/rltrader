@@ -84,8 +84,7 @@ def evaluate_performance(validation_results, craw_db):
     for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
         stock_name = row['stock_name']  # stock_name -> stock_name
         pattern_date = row['date']
-        confidence = row.get('Confidence', 0)  # confidence 값 가져오기
-        prediction = row.get('Prediction', 0) # prediction 값 가져오기
+        confidence = row.get('Prediction', 0)  # prediction 값으로 대체
         performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
         performance_end_date = performance_start_date + pd.Timedelta(days=60)
         
@@ -105,7 +104,6 @@ def evaluate_performance(validation_results, craw_db):
                 'estimated_profit_rate': 0.0,  # 데이터가 없는 경우 0 반환
                 'risk_adjusted_return': 0.0, # risk_adjusted_return 값 추가
                 'confidence': confidence,  # confidence 값 저장
-                'prediction': prediction # prediction 값 저장
             })
         else:
             max_return, max_loss, estimated_profit_rate, risk_adjusted_return = calculate_performance(df, performance_start_date, performance_end_date)
@@ -130,7 +128,6 @@ def evaluate_performance(validation_results, craw_db):
                 'estimated_profit_rate': round(estimated_profit_rate, 2),  # 소수점 2자리로 반올림
                 'risk_adjusted_return': round(risk_adjusted_return, 2), # risk_adjusted_return 값 추가
                 'confidence': round(confidence, 4),   # confidence 값 저장
-                'prediction': round(prediction, 4) # prediction 값 저장
             })
         
         # 진행 상황 출력
@@ -301,11 +298,6 @@ def save_performance_to_deeplearning(predictions_df, settings):
         # 모델 이름 설정
         method_name = model_name
         dl_data['method'] = method_name
-        
-        # confidence 값 설정: confidence와 prediction 중 0이 아닌 값을 선택
-        dl_data['confidence'] = dl_data.apply(
-            lambda row: row.get('confidence', 0) if row.get('confidence', 0) != 0 else row.get('prediction', 0), axis=1
-        )
         
         # 테이블 구조에 맞게 필요한 컬럼만 선택
         keep_columns = ['date', 'method', 'stock_name', 'confidence', 'estimated_profit_rate', 'risk_adjusted_return']

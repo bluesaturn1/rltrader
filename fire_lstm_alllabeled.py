@@ -1635,43 +1635,7 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
                 # 데이터를 날짜순으로 정렬
                 df = df.sort_values(by='date')
                 
-                # 각 날짜별로 이후 15일 동안의 최대 수익률과 최대 손실률 계산
-                for i in range(len(df) - 1):
-                    current_date_val = df.iloc[i]['date']
-                    next_day_idx = i + 1
-                    
-                    # 다음날부터 window_days일 또는 데이터 끝까지의 데이터 추출
-                    end_idx = min(next_day_idx + 15, len(df))
-                    future_data = df.iloc[next_day_idx:end_idx].copy()
-                    
-                    # 미래 데이터가 충분하지 않으면 건너뛰기
-                    if len(future_data) < 3:
-                        continue
-                        
-                    # 매수 기준가 (다음날 시가)
-                    buy_price = future_data.iloc[0]['open']
-                    
-                    if buy_price <= 0:
-                        continue
-                        
-                    # 일별 수익률 계산
-                    future_data['return'] = (future_data['close'] - buy_price) / buy_price * 100
-                    
-                    # 최대 상승률과 최대 하락률 계산
-                    max_profit = future_data['return'].max()
-                    max_loss = future_data['return'].min()
-                    
-                    # Risk-adjusted return 계산
-                    if max_loss >= 0:  # 손실이 없는 경우
-                        risk_adjusted_return = max_profit
-                    elif max_profit <= 0:  # 이익이 없는 경우
-                        risk_adjusted_return = max_loss
-                    else:  # 이익과 손실이 모두 있는 경우
-                        risk_adjusted_return = max_profit / abs(max_loss) if abs(max_loss) > 0 else max_profit
-                    
-                    # 현재 날짜에 라벨 부여
-                    df.iloc[i, df.columns.get_loc('Label')] = risk_adjusted_return
-                
+                df = label_all_dates_future_returns(df, window_days=15)
                 # NaN 값을 가진 행 제거
                 df = df.dropna(subset=['Label'])
                 

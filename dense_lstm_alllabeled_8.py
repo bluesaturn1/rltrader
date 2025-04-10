@@ -1316,7 +1316,12 @@ def load_validation_data(craw_db, stock_items, validation_chunks, best_model):
                 if avg_volume <= 30000:
                     print(f"⚠️ {stock_name} - 평균 거래량 ({int(avg_volume)})이 3만 이하입니다. 건너뜁니다.")
                     continue
-                
+            # 최근 5일 중에 거래량 0인 날이 있으면 건너뛰기
+            last_days = 5
+            recent_days = recent_data.iloc[-last_days:]
+            if (recent_days['volume'] == 0).any():
+                print(f"⚠️ {stock_name} - 최근 {last_days}일 내 거래량 0으로 감지됨. 건너뜁니다.")
+                continue   
             
             # 마지막 날짜 기준으로 과거 500봉 데이터 추출
             df_window = all_df.tail(900).copy()  # 충분한 데이터 확보
