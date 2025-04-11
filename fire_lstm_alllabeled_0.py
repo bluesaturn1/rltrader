@@ -278,20 +278,21 @@ def load_daily_craw_data_batch(db_manager, table, validation_dates, start_date_o
         print(f"Error loading batch data: {e}")
         return pd.DataFrame()
 
-
-
-def label_next_day_returns(df):
+def label_all_dates_future_returns(df, window_days=7):
     """
-    오늘 종가에 매수하여 다음날 종가에 판매했을 때의 수익률로 라벨링합니다.
+    단일 종목의 모든 날짜에 대해 오늘 종가 매수 후 window_days 동안의 
+    risk_adjusted_return을 계산하여 라벨링합니다.
+    상한가인 경우에는 매수 불가능하므로 라벨을 0으로 설정합니다.
     
     Args:
         df: 특성이 추출된 데이터프레임 (단일 종목)
+        window_days: 수익률 계산 기간 (일)
     
     Returns:
         라벨이 부여된 데이터프레임
     """
     try:
-        print('Labeling based on next day returns (today close to tomorrow close)')
+        print('Labeling all dates based on future returns (today close purchase)')
         
         # 날짜 형식을 datetime으로 변환
         df['date'] = pd.to_datetime(df['date'])
@@ -302,28 +303,79 @@ def label_next_day_returns(df):
         # 데이터를 날짜순으로 정렬
         df = df.sort_values(by='date')
         
-        # 오늘 종가에 매수, 내일 종가에 판매했을 때의 수익률 계산
-        for i in range(len(df) - 1):
-            current_close = df.iloc[i]['close']
-            next_close = df.iloc[i+1]['close']
+        # 각 날짜별로 이후 window_days 동안의 최대 수익률과 최대 손실률 계산
+        for i in range(len(df) - window_days):
+            current_date = df.iloc[i]['date']
             
-            if current_close <= 0:
+            # 상한가 여부 확인 (전일 종가 대비 29% 이상 상승한 경우로 단순화)
+            if i > 0:  # 첫 번째 행이 아닌 경우에만 체크
+                prev_close = df.iloc[i-1]['close']
+                current_close = df.iloc[i]['close']
+                
+                # 상한가로 간주할 수 있는 조건 (30% 가까이 상승한 경우)
+                price_increase_percent = ((current_close - prev_close) / prev_close) * 100
+                
+                if price_increase_percent >= 29.0:
+                    print(f"상한가 감지: {current_date}, 상승률: {price_increase_percent:.2f}%")
+                    df.iloc[i, df.columns.get_loc('Label')] = 0
+                    continue  # 다음 날짜로 넘어감
+            
+            # 오늘 종가에 매수
+            buy_price = df.iloc[i]['close']
+            
+            if buy_price <= 0:
+                continue
+            
+            # 다음날부터 window_days일까지의 데이터 추출
+            future_data = df.iloc[i+1:i+1+window_days].copy()
+            
+            # 미래 데이터가 충분하지 않으면 건너뛰기
+            if len(future_data) < 3:
                 continue
                 
-            # 단순 다음날 수익률 계산 (%)
-            next_day_return = (next_close - current_close) / current_close * 100
+            # 일별 수익률 계산
+            future_data['return'] = (future_data['close'] - buy_price) / buy_price * 100
+            
+            # 최대 상승률과 최대 하락률 계산
+            max_profit = future_data['return'].max()
+            max_loss = future_data['return'].min()
+            
+            # Risk-adjusted return calculation
+            if max_loss >= 0:  # No loss
+                risk_adjusted_return = max_profit
+            elif max_profit <= 0:  # No profit
+                risk_adjusted_return = max_loss
+            else:  # Both profit and loss exist
+                if abs(max_loss) < 0.001:  # Very small loss close to 0
+                    risk_adjusted_return = 999.0  # Use large value instead of infinity
+                else:
+                    risk_adjusted_return = max_profit / abs(max_loss)
+                    
+            # Safety clipping to avoid extreme values
+            risk_adjusted_return = np.clip(risk_adjusted_return, -999.0, 999.0)
+            # 이상치 제한 (-5에서 5 사이로 클리핑)
+            risk_adjusted_return = np.clip(risk_adjusted_return, -5, 5)
+            
+            # 로그 변환 적용
+            if risk_adjusted_return > 0:
+                risk_adjusted_return = np.log1p(risk_adjusted_return)
+            elif risk_adjusted_return < 0:
+                risk_adjusted_return = -np.log1p(abs(risk_adjusted_return))
             
             # 현재 날짜에 라벨 부여
-            df.iloc[i, df.columns.get_loc('Label')] = next_day_return
+            df.iloc[i, df.columns.get_loc('Label')] = risk_adjusted_return
         
         # NaN 값을 가진 행 제거
         df = df.dropna(subset=['Label'])
         
-        print(f"Labeled {len(df)} rows with next day return data")
+        # 상한가 감지 통계 출력
+        upper_limit_count = len(df[df['Label'] == 0])
+        print(f"Labeled {len(df)} rows with future return data (based on today's close)")
+        print(f"Detected {upper_limit_count} upper limit cases (marked as 0)")
         
         return df
     except Exception as e:
-        print(f'Error in label_next_day_returns: {e}')
+        print(f'Error in label_all_dates_future_returns: {e}')
         import traceback
         traceback.print_exc()
         return df
@@ -1222,7 +1274,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
 
     # Initialize settings dictionary here
     settings = {
-        'model_name': 'fire_lstm_all_labeled_8',
+        'model_name': 'fire_lstm_all_labeled_0',
         'buy_list_db': buy_list_db,
         'craw_db': craw_db,
         'telegram_token': cf.TELEGRAM_BOT_TOKEN,
@@ -1483,7 +1535,7 @@ def load_stock_data_for_signals(db_manager, stock_signals, table):
             return pd.DataFrame()
         
         # 모든 날짜에 대해 라벨링 - 기존 label_data 대신 새로운 함수 사용
-        df_labeled = label_next_day_returns(df_features)
+        df_labeled = label_all_dates_future_returns(df_features, window_days=8)
         
         # 마지막 시그널 날짜까지의 데이터만 사용 (미래 데이터 제외)
         df_labeled = df_labeled[df_labeled['date'] <= latest_signal_date]
@@ -1606,6 +1658,10 @@ def process_filtered_results(filtered_results, buy_list_db, craw_db, model_dir, 
                 
                 # 데이터를 날짜순으로 정렬
                 df = df.sort_values(by='date')
+                
+                df = label_all_dates_future_returns(df, window_days=8)
+                # NaN 값을 가진 행 제거
+                df = df.dropna(subset=['Label'])
                 
                 if df.empty:
                     print(f"{stock_name}: 라벨링 후 데이터가 없습니다.")
