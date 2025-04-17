@@ -880,7 +880,7 @@ def initialize_settings():
     password = cf.MYSQL_PASSWORD
     database_buy_list = cf.MYSQL_DATABASE_BUY_LIST
     database_craw = cf.MYSQL_DATABASE_CRAW
-    results_table = cf.DENSE_PPO_TABLE
+    results_table = cf.DENSE_UPDOWN_RESULTS_TABLE
     performance_table = cf.PPO_PERFORMANCE_TABLE
     telegram_token = cf.TELEGRAM_BOT_TOKEN
     telegram_chat_id = cf.TELEGRAM_CHAT_ID
@@ -1805,71 +1805,6 @@ def save_validation_results(filtered_results, settings):
         print(f"DB 저장 중 오류 발생: {e}")
         traceback.print_exc()
 
-def visualize_validation_results(results_df):
-    """검증 결과를 시각화합니다."""
-    import matplotlib.pyplot as plt
-    import matplotlib.font_manager as fm
-    
-    # 한글 폰트 설정
-    try:
-        font_path = 'C:/Windows/Fonts/malgun.ttf'  # 윈도우 한글 폰트
-        font_prop = fm.FontProperties(fname=font_path)
-        plt.rc('font', family=font_prop.get_name())
-    except:
-        print("한글 폰트 설정에 실패했습니다. 기본 폰트를 사용합니다.")
-    
-    plt.figure(figsize=(14, 10))
-    
-    # 1. 신뢰도와 수익률 간의 산점도
-    plt.subplot(2, 2, 1)
-    plt.scatter(results_df['confidence'], results_df['max_profit_rate'], alpha=0.5)
-    plt.title('신뢰도와 최대 수익률의 관계')
-    plt.xlabel('신뢰도')
-    plt.ylabel('최대 수익률 (%)')
-    plt.grid(True)
-    
-    # 2. 신뢰도 분포
-    plt.subplot(2, 2, 2)
-    plt.hist(results_df['confidence'], bins=20, alpha=0.5)
-    plt.title('신뢰도 분포')
-    plt.xlabel('신뢰도')
-    plt.ylabel('빈도')
-    plt.grid(True)
-    
-    # 3. 신뢰도 구간별 평균 수익률
-    plt.subplot(2, 2, 3)
-    results_df['confidence_bin'] = pd.qcut(results_df['confidence'], 5, labels=False)
-    avg_profit_by_confidence = results_df.groupby('confidence_bin')['max_profit_rate'].mean()
-    plt.bar(avg_profit_by_confidence.index, avg_profit_by_confidence.values)
-    plt.title('신뢰도 구간별 평균 수익률')
-    plt.xlabel('신뢰도 구간 (낮음 -> 높음)')
-    plt.ylabel('평균 수익률 (%)')
-    plt.grid(True)
-    
-    # 4. 날짜별 매수 신호 개수
-    plt.subplot(2, 2, 4)
-    results_df['date_only'] = pd.to_datetime(results_df['date']).dt.date
-    signal_count_by_date = results_df.groupby('date_only').size()
-    plt.plot(signal_count_by_date.index, signal_count_by_date.values, marker='o')
-    plt.title('날짜별 매수 신호 개수')
-    plt.xlabel('날짜')
-    plt.ylabel('매수 신호 개수')
-    plt.grid(True)
-    plt.xticks(rotation=45)
-    
-    plt.tight_layout()
-    
-    # 파일로 저장
-    plot_filename = f"validation_results_plot_{datetime.now().strftime('%Y%m%d_%H%M')}.png"
-    plt.savefig(plot_filename)
-    print(f"시각화 결과가 {plot_filename}에 저장되었습니다.")
-    
-    # 화면에 표시
-    plt.show()
-    
-    # 신뢰도와 수익률 간의 상관계수 계산
-    correlation = results_df['confidence'].corr(results_df['max_profit_rate'])
-    print(f"\n신뢰도와 수익률 간의 상관계수: {correlation:.4f}")
 
 def save_results_to_db(results_df, buy_list_db, performance_table):
     """검증 결과를 데이터베이스에 저장합니다."""

@@ -1207,7 +1207,7 @@ def run_validation(best_model, buy_list_db, craw_db, results_table, current_date
 
     # Initialize settings dictionary here
     settings = {
-        'model_name': 'dense_lstm_all_labeled_8',
+        'model_name': 'dense_lstm_0',
         'buy_list_db': buy_list_db,
         'craw_db': craw_db,
         'telegram_token': cf.TELEGRAM_BOT_TOKEN,
@@ -1259,7 +1259,7 @@ def load_model_and_validate(model_dir, buy_list_db, craw_db, results_table, curr
     """지정된 모델 파일을 직접 로드하고 검증합니다."""
     try:
         # 지정된 모델 파일명
-        specified_model = "dense_lstm_all_labeled_8.keras"
+        specified_model = "dense_lstm_0.keras"
         model_path = os.path.join(model_dir, specified_model)
         
         if os.path.exists(model_path):

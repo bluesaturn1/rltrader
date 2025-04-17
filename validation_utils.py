@@ -84,7 +84,7 @@ def evaluate_performance(validation_results, craw_db):
     for index, row in tqdm(validation_results.iterrows(), total=len(validation_results), desc="Evaluating performance"):
         stock_name = row['stock_name']  # stock_name -> stock_name
         pattern_date = row['date']
-        confidence = row.get('Prediction', 0)  # prediction 값으로 대체
+        confidence = row.get('prediction', 0)  # prediction 값으로 대체
         performance_start_date = pattern_date + pd.Timedelta(days=1)  # 다음날 매수
         performance_end_date = performance_start_date + pd.Timedelta(days=60)
         
