@@ -1259,49 +1259,82 @@ def backtest_top_signals(top_signals, settings):
         print("백테스팅 결과가 없습니다.")
         return None
 
+# ...existing code...
 def setup_validation_environment(settings):
-    """검증 환경을 설정하고 필요한 데이터를 준비합니다."""
-    # 설정에서 필요한 값 가져오기
-    craw_db = settings['craw_db']
-    buy_list_db = settings['buy_list_db']
-    
-    # 검증 날짜 범위 설정
-    validation_start = datetime.strptime(cf.VALIDATION_START_DATE)
-    validation_end = datetime.strptime(cf.VALIDATION_END_DATE)
-    
-    # 검증 날짜 범위 확인
-    print(f"검증 기간: {validation_start} ~ {validation_end}")
-    
-    # 검증 기간이 너무 짧거나 부적절한 경우 조정
-    # if (validation_end - validation_start).days < 5:
-    #     print("⚠️ 검증 기간이 너무 짧습니다. 기본값으로 설정합니다.")
-    #     validation_end = datetime.now().date()
-    #     validation_start = validation_end - timedelta(days=30)  # 기본값 30일
-    #     print(f"조정된 검증 기간: {validation_start} ~ {validation_end}")
-    
-    # 종목 목록 가져오기
+    """검증 환경을 설정합니다."""
+    print("\n===== 검증 환경 설정 =====")
+    craw_db = None # 변수 초기화
+    buy_list_db = None # 변수 초기화
     try:
-        # stock_list_query = "SELECT DISTINCT stock_name FROM stock_item_all"
-        stock_list_query = """
-        SELECT DISTINCT stock_name FROM stock_kospi
-        UNION
-        SELECT DISTINCT stock_name FROM stock_kosdaq;
-        """
-        stock_list_df = buy_list_db.execute_query(stock_list_query)
-        stock_names = stock_list_df['stock_name'].tolist()
-        print(f"Total stocks for validation: {len(stock_names)}")
+        # 검증 기간 설정
+        validation_start = datetime.strptime(cf.VALIDATION_START_DATE, '%Y-%m-%d').date()
+        validation_end = datetime.strptime(cf.VALIDATION_END_DATE, '%Y-%m-%d').date()
+        print(f"검증 기간: {validation_start} ~ {validation_end}")
+
+        # 데이터베이스 연결
+        craw_db = DBConnectionManager(
+            host=cf.MYSQL_HOST,
+            user=cf.MYSQL_USER,
+            password=cf.MYSQL_PASSWORD,
+            database=cf.MYSQL_DATABASE_CRAW,
+        )
+        buy_list_db = DBConnectionManager(
+            host=cf.MYSQL_HOST,
+            user=cf.MYSQL_USER,
+            password=cf.MYSQL_PASSWORD,
+            database=cf.MYSQL_DATABASE_BUY_LIST,
+        )
+
+        # 검증 대상 종목 목록 가져오기 (get_stock_items 사용, DataFrame 반환 가정)
+        stock_items_df = get_stock_items(settings['host'], settings['user'], settings['password'], settings['database_buy_list'])
+
+        # DataFrame이 비어 있는지 확인
+        if stock_items_df is None or stock_items_df.empty: # 수정: .empty 사용
+            print("Error: No stock items found using get_stock_items (DataFrame is empty or None).")
+            # DB 연결 종료 추가
+            if craw_db: craw_db.close()
+            if buy_list_db: buy_list_db.close()
+            return {'stock_names': [], 'craw_db': None, 'buy_list_db': None, 'validation_start': None, 'validation_end': None}
+
+        # DataFrame에서 종목명 리스트 추출 (컬럼 이름 'stock_name' 가정)
+        if 'stock_name' in stock_items_df.columns:
+             stock_names = stock_items_df['stock_name'].tolist()
+             print(f"get_stock_items를 통해 {len(stock_names)}개 종목 목록 로드 완료.")
+        else:
+             print("Error: 'stock_name' column not found in the DataFrame returned by get_stock_items.")
+             if craw_db: craw_db.close()
+             if buy_list_db: buy_list_db.close()
+             return {'stock_names': [], 'craw_db': None, 'buy_list_db': None, 'validation_start': None, 'validation_end': None}
+
+
+        # 추출된 리스트가 비어 있는지 다시 확인
+        if not stock_names:
+             print("Error: Extracted stock name list is empty.")
+             if craw_db: craw_db.close()
+             if buy_list_db: buy_list_db.close()
+             return {'stock_names': [], 'craw_db': None, 'buy_list_db': None, 'validation_start': None, 'validation_end': None}
+
+
+        print(f"총 {len(stock_names)}개 종목에 대해 검증 환경 설정 완료")
+
+        return {
+            'stock_names': stock_names, # 추출된 리스트 반환
+            'craw_db': craw_db,
+            'buy_list_db': buy_list_db,
+            'validation_start': validation_start,
+            'validation_end': validation_end
+        }
     except Exception as e:
-        print(f"Error getting stock list: {e}")
-        stock_names = []
-    
-    # 실행 환경 구성 정보 반환
-    return {
-        'craw_db': craw_db,
-        'buy_list_db': buy_list_db,
-        'validation_start': validation_start,
-        'validation_end': validation_end,
-        'stock_names': stock_names
-    }
+        print(f"검증 환경 설정 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        # 오류 발생 시에도 DB 연결 종료 시도
+        if craw_db: craw_db.close()
+        if buy_list_db: buy_list_db.close()
+        return {'stock_names': [], 'craw_db': None, 'buy_list_db': None, 'validation_start': None, 'validation_end': None}
+
+# ...existing code...
+
 
 def validate_all_stocks(model, validation_env, settings):
     """모든 종목에 대해 검증을 수행합니다."""
