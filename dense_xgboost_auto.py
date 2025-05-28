@@ -690,6 +690,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
                 'date': date,
                 'stock_name': row['stock_name'],
                 'score': round(row['Score'], 4),
+                'prediction': round(row['Score'], 4),  # prediction 컬럼 추가
                 'rank': rank
             })
             rank += 1
@@ -706,7 +707,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
         for date, group in validation_results.groupby('date'):
             print(f"\nDate: {date.strftime('%Y-%m-%d')}")
             for _, row in group.iterrows():
-                print(f"  Rank {row['rank']}: {row['stock_name']} (Score: {row['score']:.4f})")
+                print(f"  Rank {row['rank']}: {row['stock_name']} (Score: {row['prediction']:.4f})")  # score -> prediction
         
         # 검증된 종목의 개수 출력
         unique_stock_names = validation_results['stock_name'].nunique()
@@ -717,7 +718,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
         for date, group in validation_results.groupby('date'):
             message += f"📅 {date.strftime('%Y-%m-%d')}:\n"
             for _, row in group.iterrows():
-                message += f"  #{row['rank']} {row['stock_name']} (Score: {row['score']:.4f})\n"
+                message += f"  #{row['rank']} {row['stock_name']} (Score: {row['prediction']:.4f})\n"  # score -> prediction
             message += "\n"
         
         message += f"Total unique dates: {validation_results['date'].nunique()}"
@@ -725,6 +726,11 @@ def validate_model(model, buy_list_db, craw_db, settings):
     else:
         message = f"No patterns found in the validation period\n{results_table}\n{validation_start_date} to {validation_end_date}"
         send_telegram_message(telegram_token, telegram_chat_id, message)
+    
+    # 최종 결과를 validation_utils로 전달하기 전에 prediction 컬럼 확인
+    if not validation_results.empty and 'prediction' not in validation_results.columns:
+        print("Adding 'prediction' column based on 'score' for validation_utils compatibility")
+        validation_results['prediction'] = validation_results['score']
     
     return validation_results
 

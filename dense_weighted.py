@@ -387,6 +387,7 @@ def predict_pattern(model, df, stock_name, use_data_dates=True, settings=None):
         print(f'Stack trace:\n{traceback.format_exc()}')
         return pd.DataFrame(columns=['date', 'stock_name'])
 
+
 def setup_environment():
     """환경 설정 및 필요한 변수들을 초기화합니다."""
     print("Starting pattern recognition by xgboost...")
@@ -446,6 +447,7 @@ def setup_environment():
     }
     
     return buy_list_db, craw_db, settings
+
 
 def load_or_train_model(buy_list_db, craw_db, filtered_results, settings):
     """사용자 입력에 따라 기존 모델을 로드하거나 새 모델을 훈련합니다."""
@@ -728,7 +730,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
             final_results.append({
                 'date': date,
                 'stock_name': row['stock_name'],
-                'score': round(row['Score'], 4),
+                'prediction': round(row['Score'], 4),  # 'score' 대신 'prediction'으로 변경
                 'rank': rank
             })
             rank += 1
@@ -736,16 +738,19 @@ def validate_model(model, buy_list_db, craw_db, settings):
     validation_results = pd.DataFrame(final_results)
     
     if not validation_results.empty:
+        # 출력을 위해 임시로 score 컬럼 추가 (원래 코드와의 호환성 유지)
+        validation_results['score'] = validation_results['prediction']
+        
         validation_results = validation_results.sort_values(by=['date', 'rank'])
         print("\nValidation results (Top 3 stocks by date):")
         print(validation_results)
         
-        # 결과 요약 표시
+        # 결과 요약 표시 (score 참조 부분 수정)
         print("\nSummary by date:")
         for date, group in validation_results.groupby('date'):
             print(f"\nDate: {date.strftime('%Y-%m-%d')}")
             for _, row in group.iterrows():
-                print(f"  Rank {row['rank']}: {row['stock_name']} (Score: {row['score']:.4f})")
+                print(f"  Rank {row['rank']}: {row['stock_name']} (Score: {row['prediction']:.4f})")
         
         # 검증된 종목의 개수 출력
         unique_stock_names = validation_results['stock_name'].nunique()
@@ -756,7 +761,7 @@ def validate_model(model, buy_list_db, craw_db, settings):
         for date, group in validation_results.groupby('date'):
             message += f"📅 {date.strftime('%Y-%m-%d')}:\n"
             for _, row in group.iterrows():
-                message += f"  #{row['rank']} {row['stock_name']} (Score: {row['score']:.4f})\n"
+                message += f"  #{row['rank']} {row['stock_name']} (Score: {row['prediction']:.4f})\n"
             message += "\n"
         
         message += f"Total unique dates: {validation_results['date'].nunique()}"

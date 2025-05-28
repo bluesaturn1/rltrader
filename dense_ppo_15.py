@@ -20,6 +20,7 @@ import time
 from db_connection import DBConnectionManager
 import pickle
 import torch as th  # PyTorch 임포트
+import validation_utils
 
 COLUMNS_CHART_DATA = ['date', 'open', 'high', 'low', 'close', 'volume']
 
@@ -906,7 +907,8 @@ def initialize_settings():
         'checkpoint_dir': checkpoint_dir,
         'progress_file': progress_file,
         'buy_list_db': buy_list_db,
-        'craw_db': craw_db
+        'craw_db': craw_db,
+        'model_name': 'dense_ppo_15'
     }
 
 def load_progress(progress_file):
@@ -1149,36 +1151,61 @@ def extract_top_signals_by_date(results_df, top_n=5):
     else:
         return pd.DataFrame()
 
+        
 def validate_model(settings, model):
     """훈련된 모델을 검증하고 높은 신뢰도의 매수 신호를 추출합니다."""
     print("\n===== 모델 검증 시작 =====")
-    
+
     if not model:
         print("Error: No model provided for validation")
         return
-    
+
     # 검증 환경 설정
     validation_env = setup_validation_environment(settings)
     if not validation_env['stock_names']:
         return
-    
+
     # 모든 종목에 대해 검증 실행
     validation_results = validate_all_stocks(model, validation_env, settings)
     
     # 결과 카운트 추가
     print(f"\n총 {len(validation_results)}개 매수 신호 발견")
-    
-    # 검증 결과 처리
+
+    # 기존 settings에서 필요한 값들을 사용 (새로 생성하지 않음)
+    process_settings = {
+        'model_name': 'dense_ppo_15',
+        'buy_list_db': settings['buy_list_db'],
+        'craw_db': settings['craw_db'],
+        'telegram_token': cf.TELEGRAM_BOT_TOKEN,
+        'telegram_chat_id': cf.TELEGRAM_CHAT_ID,
+        'results_table': settings['results_table']
+    }
+
+    # 검증 결과 처리 - 중요: 리스트를 DataFrame으로 변환
     if validation_results:
-        process_validation_results(validation_results, settings, model)
+        # 리스트를 DataFrame으로 변환
+        validation_results_df = pd.DataFrame(validation_results)
+        
+        # 중요: confidence 값을 prediction 컬럼에 복사 (validation_utils 호환성을 위해)
+        if 'confidence' in validation_results_df.columns:
+            validation_results_df['prediction'] = validation_results_df['confidence']
+            print("confidence 값을 prediction 컬럼에 복사했습니다 (validation_utils 호환성)")
+        
+        # 날짜 타입 변환 (필요 시)
+        if 'date' in validation_results_df.columns:
+            validation_results_df['date'] = pd.to_datetime(validation_results_df['date'])
+        
+        # DataFrame을 validation_utils로 전달
+        validation_utils.process_and_report_validation_results(validation_results_df, process_settings)
     else:
         print("No validation results found - 매수 신호를 찾지 못했습니다.")
         print("다음을 확인해 보세요:")
         print("1. 검증 기간이 적절한가? (cf.VALIDATION_START_DATE, cf.VALIDATION_END_DATE)")
         print("2. 모델이 매수 신호를 생성하는가? (신뢰도 임계값을 낮춰보세요)")
         print("3. 데이터 형식과 날짜 타입이 일관되게 처리되는가?")
-        
+
         send_telegram_message(settings['telegram_token'], settings['telegram_chat_id'], "모델 검증 완료: 신호 없음")
+
 
 def backtest_top_signals(top_signals, settings):
     """상위 매수 신호에 대한 백테스팅 수행"""
@@ -1333,18 +1360,16 @@ def setup_validation_environment(settings):
         if buy_list_db: buy_list_db.close()
         return {'stock_names': [], 'craw_db': None, 'buy_list_db': None, 'validation_start': None, 'validation_end': None}
 
-# ...existing code...
-
 
 def validate_all_stocks(model, validation_env, settings):
-    """모든 종목에 대해 검증을 수행합니다."""
+    """모든 종목에 대해 검증을 수행하고 날짜별로 매수 신호 중 신뢰도가 높은 상위 3개만 반환합니다."""
     craw_db = validation_env['craw_db']
     validation_start = validation_env['validation_start']
     validation_end = validation_env['validation_end']
     stock_names = validation_env['stock_names']
     
     # 결과 저장 리스트
-    validation_results = []
+    all_results = []
     
     # 각 종목별로 검증 (테스트 시에는 일부만 사용)
     test_mode = input("Test mode? (y/n): ").strip().lower() == 'y'
@@ -1354,13 +1379,52 @@ def validate_all_stocks(model, validation_env, settings):
         try:
             stock_results = validate_single_stock(model, stock_name, craw_db, validation_start, validation_end, settings)
             if stock_results:
-                validation_results.extend(stock_results)
+                all_results.extend(stock_results)
         except Exception as e:
             print(f"Error validating {stock_name}: {e}")
             import traceback
             traceback.print_exc()
     
-    return validation_results
+    # 결과가 없으면 빈 리스트 반환
+    if not all_results:
+        print("검증 결과가 없습니다.")
+        return []
+    
+    # 결과를 DataFrame으로 변환
+    results_df = pd.DataFrame(all_results)
+    
+    # 매수 신호(action=1)만 필터링
+    buy_signals = results_df[results_df['action'] == 1].copy()
+    
+    if buy_signals.empty:
+        print("매수 신호가 없습니다.")
+        return []
+    
+    # 날짜별로 그룹화하고 각 날짜별로 신뢰도 상위 3개 선택
+    top_signals_by_date = []
+    
+    # 날짜별 그룹화
+    for date, group in buy_signals.groupby('date'):
+        # 해당 날짜의 신호를 신뢰도 순으로 정렬
+        sorted_group = group.sort_values('confidence', ascending=False)
+        # 상위 3개 선택
+        top_3_for_date = sorted_group.head(3)
+        top_signals_by_date.append(top_3_for_date)
+    
+    # 모든 날짜의 상위 신호 합치기
+    if top_signals_by_date:
+        top_signals_df = pd.concat(top_signals_by_date)
+        
+        print("\n===== 날짜별 신뢰도 기준 상위 3개 매수 신호 =====")
+        for date, group in top_signals_df.groupby('date'):
+            print(f"\n날짜: {date} - 상위 3개 종목:")
+            for _, row in group.iterrows():
+                print(f"종목: {row['stock_name']}, 신뢰도: {row['confidence']:.4f}")
+        
+        # 결과를 리스트로 변환하여 반환 (validation_model에서 DataFrame으로 다시 변환됨)
+        return top_signals_df.to_dict('records')
+    else:
+        return []
 
 
 def validate_single_stock(model, stock_name, craw_db, validation_start, validation_end, settings):
