@@ -15,6 +15,7 @@ MYSQL_PASSWORD = 'bluesaturn1+'
 MYSQL_PORT = 3306
 MYSQL_DATABASE_BUY_LIST = 'daily_buy_list'
 MYSQL_DATABASE_CRAW = 'daily_craw'
+BREAKTHROUGH_RESULTS_TABLE = 'breakthrough_results'  # finding & training table
 FIREARROW_RESULTS_TABLE = 'firearrow_results_2000'  # finding & training table
 FINDING_SKYROCKET_TABLE = 'finding_skyrocket'  # finding & training table
 FINDING_RESULTS_TABLE = 'dense_results_2013'  # finding & training table
@@ -27,8 +28,8 @@ LSTM_PERFORMANCE_TABLE = 'dense_lstm_performance'  # LSTM performance table
 PPO_PERFORMANCE_TABLE = 'dense_ppo_performance'  # PPO performance table
 
 # 검색 설정
-SEARCH_START_DATE = '2000-01-01' #2015년 6월부터 상한가 30%로 변경 
-SEARCH_END_DATE = '2022-12-31'
+SEARCH_START_DATE = '2015-06-01' #2015년 6월부터 상한가 30%로 변경 
+SEARCH_END_DATE = '2024-06-30'
 PERIOD = 60
 PRICE_CHANGE_THRESHOLD = 1.0
 PRICE_CHANGE_THRESHOLD_2 = 0.75
@@ -47,14 +48,13 @@ PREDICTION_VALIDATION_DAYS = 30  # 최신 데이터 이후 30일간의 예측 �
 # LSTM
 LSTM_PREDICTION_LIMIT = 0.1
 # 검증 설정
-VALIDATION_START_DATE = '2023-05-01'  # 검증 기간 시작 날짜 설정
-VALIDATION_END_DATE = '2023-05-31' # 검증 기간 종료 날짜 설정
+VALIDATION_START_DATE = '2025-01-01' # 검증 기간 시작 날짜 설정
+VALIDATION_END_DATE = '2025-01-31' # 검증 기간 종료 날짜 설정
 # 오늘 기준 검증
 # 현재 날짜 가져오기
 now = datetime.now()
 # validation_end_date 설정 (현재 날짜)
 validation_end = now
-
 # validation_start_date 설정 (end_date로부터 7일 전)
 validation_start = validation_end - timedelta(days=7)
 

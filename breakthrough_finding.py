@@ -56,7 +56,7 @@ def setup_config():
         'password': cf.MYSQL_PASSWORD,
         'database_buy_list': cf.MYSQL_DATABASE_BUY_LIST,
         'database_craw': cf.MYSQL_DATABASE_CRAW,
-        'results_table': cf.FIREARROW_RESULTS_TABLE,
+        'results_table': cf.BREAKTHROUGH_RESULTS_TABLE,
         'port': cf.MYSQL_PORT,
         'search_start_date': cf.SEARCH_START_DATE,
         'search_end_date': cf.SEARCH_END_DATE,
@@ -120,18 +120,65 @@ def find_arrow_signals(df):
     
     return arrow_signals
 
+def find_breakthrough_signals(df):
+    """
+    전고점 돌파 신호 찾기 (120봉 전부터 5봉 전까지의 최고가를 갱신하며, 최근 4봉 동안 전고를 깨지 않은 경우)
+    - 고가 기준으로 전고점 돌파를 허용
+    - 상한가 조건을 만족하는 경우 제외
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Ensure 'date' column is in datetime format
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # 120봉 전부터 5봉 전까지의 최고가 계산
+    df['previous_high'] = df['high'].rolling(window=120).max().shift(5)
+    
+    # 전고점 돌파 조건: 현재 고가가 previous_high를 돌파
+    df['is_breakthrough'] = df['high'] > df['previous_high']
+    
+    # 최근 4봉 동안 전고를 깨지 않은 조건 추가
+    df['not_broken_recently'] = True
+    for i in range(1, 5):  # 4, 3, 2, 1봉 전
+        df['not_broken_recently'] &= df['high'].shift(i) <= df['previous_high']
+    
+    # 상한가 조건: 종가가 상한가인 경우 제외
+    # 2015년 6월 1일 이후 상한가: 30%, 그 이전은 15%
+    limit_up_date = pd.Timestamp('2015-06-01')  # Convert comparison date to datetime
+    df['limit_up'] = ((df['close'] / df['open'] - 1) * 100 >= 30) & (df['date'] >= limit_up_date)
+    df['limit_up'] |= ((df['close'] / df['open'] - 1) * 100 >= 15) & (df['date'] < limit_up_date)
+    
+    # 다음날 상한가 조건 추가
+    df['next_day_limit_up'] = df['limit_up'].shift(-1).fillna(False).astype(bool)  # 수정: bool 타입으로 변환
+    
+    # 최종 조건: 전고점 돌파 + 최근 4봉 동안 전고를 깨지 않음 + 상한가 조건 제외
+    breakthrough_signals = df[
+        df['is_breakthrough'] & 
+        df['not_broken_recently'] & 
+        ~df['limit_up'] & 
+        ~df['next_day_limit_up']  # 수정된 부분
+    ].copy()
+    
+    # 돌파 신호가 있는 경우
+    if not breakthrough_signals.empty:
+        breakthrough_signals['breakthrough'] = True
+    else:
+        breakthrough_signals['breakthrough'] = False
+    
+    return breakthrough_signals
 
-def analyze_future_performance(config, stock_name, dense_date):
-    """미래 성과 분석"""
-    # Convert dense_date to string format YYYYMMDD
-    dense_date_str = dense_date.strftime('%Y%m%d')
+def analyze_future_performance(config, stock_name, breakthrough_date):
+    """미래 성과 분석 (30일 이내)"""
+    # Convert breakthrough_date to string format YYYYMMDD
+    breakthrough_date_str = breakthrough_date.strftime('%Y%m%d')
     
     # Calculate next day
-    next_date = dense_date + timedelta(days=1)
+    next_date = breakthrough_date + timedelta(days=1)
     next_date_str = next_date.strftime('%Y%m%d')
     
-    # Calculate end date (60 trading days from next day)
-    end_date = dense_date + timedelta(days=90)  # Adding 90 calendar days to ensure 60 trading days
+    # Calculate end date (30 trading days from next day)
+    end_date = breakthrough_date + timedelta(days=45)  # Adding 45 calendar days to ensure 30 trading days
     end_date_str = end_date.strftime('%Y%m%d')
     
     # Get future data
@@ -146,11 +193,11 @@ def analyze_future_performance(config, stock_name, dense_date):
     # Get initial price (first day's close price)
     initial_price = future_df.iloc[0]['close']
     
-    # Calculate maximum profit rate within 60 trading days
+    # Calculate maximum profit rate within 30 trading days
     future_df['profit_rate'] = (future_df['high'] - initial_price) / initial_price * 100
     max_profit_rate = future_df['profit_rate'].max()
     
-    # Calculate maximum loss rate within 60 trading days
+    # Calculate maximum loss rate within 30 trading days
     future_df['loss_rate'] = (future_df['low'] - initial_price) / initial_price * 100
     max_loss_rate = future_df['loss_rate'].min()
     
@@ -158,7 +205,7 @@ def analyze_future_performance(config, stock_name, dense_date):
     estimated_profit_rate = max_profit_rate - abs(max_loss_rate)
     
     return {
-        'signal_date': dense_date_str,
+        'signal_date': breakthrough_date_str,
         'initial_price': initial_price,
         'max_profit_rate': max_profit_rate,
         'max_loss_rate': max_loss_rate,
@@ -183,24 +230,21 @@ def process_stock(config, stock_name, stock_names):
         print(f"No data found for {stock_name} in the specified date range.")
         return []
     
-    # 이동평균선 계산
-    df = calculate_moving_averages(df)
+    # 전고점 돌파 신호 찾기
+    breakthrough_signals = find_breakthrough_signals(df)
     
-    # 신호 찾기
-    dense_dates = find_arrow_signals(df)
-    
-    if dense_dates.empty:
+    if breakthrough_signals.empty:
         return []
     
     results = []
-    for dense_date in dense_dates['date']:
-        performance = analyze_future_performance(config, stock_name, dense_date)
+    for breakthrough_date in breakthrough_signals['date']:
+        performance = analyze_future_performance(config, stock_name, breakthrough_date)
         
-        if performance and performance['estimated_profit_rate'] >= 75:
+        if performance and performance['estimated_profit_rate'] >= 10:  # 최소 수익률 조건
             performance['stock_name'] = stock_name
             performance['signal_date_last'] = performance['signal_date']  # 초기화 시 같은 값으로 설정
             
-            print(f"\nFound signal for {stock_name} on {performance['signal_date']}")
+            print(f"\nFound breakthrough signal for {stock_name} on {performance['signal_date']}")
             print(f"Max Profit Rate: {performance['max_profit_rate']:.2f}%")
             print(f"Max Loss Rate: {performance['max_loss_rate']:.2f}%")
             print(f"Estimated Profit Rate: {performance['estimated_profit_rate']:.2f}%")
@@ -211,6 +255,7 @@ def process_stock(config, stock_name, stock_names):
                 print(f"\nSkipping {stock_name} on {performance['signal_date']} due to low estimated profit rate ({performance['estimated_profit_rate']:.2f}%)")
     
     return results
+
 
 def process_all_stocks(config):
     """모든 종목 처리"""
